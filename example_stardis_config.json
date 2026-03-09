@@ -1,0 +1,98 @@
+{
+    "metadata": {
+        "name": "示例配置 - 体积探针温度计算",
+        "description": "这是一个示例配置文件，展示如何配置体积温度探针计算。\n适合初学者了解配置文件结构。",
+        "tags": ["example", "probe", "temperature"],
+        "created_time": "2026-02-10T10:00:00",
+        "modified_time": "2026-02-10T10:00:00",
+        "author": "Stardis Editor Team",
+        "source": ""
+    },
+    "config": {
+        "executable": {
+            "stardis_exe_path": "D:/Works/Projects/stardis-build/stardis.exe",
+            "working_directory": "D:/Works/Projects/stardis-models"
+        },
+        "basic": {
+            "model_file": "model.stl",
+            "samples": 1000000,
+            "threads": 8,
+            "verbosity": 2
+        },
+        "compute_modes": {
+            "probe_vol": {
+                "enabled": true,
+                "x": 0.0,
+                "y": 0.0,
+                "z": 1.5,
+                "t1": 0.0,
+                "t2": 100.0
+            },
+            "probe_surf": {
+                "enabled": false,
+                "x": 0.0,
+                "y": 0.0,
+                "z": 0.0,
+                "side": ""
+            },
+            "flux_surf": {
+                "enabled": false,
+                "x": 0.0,
+                "y": 0.0,
+                "z": 0.0
+            },
+            "medium_temp": {
+                "enabled": false,
+                "name": ""
+            },
+            "surf_mean_temp": {
+                "enabled": false,
+                "file": ""
+            },
+            "surf_temp_map": {
+                "enabled": false,
+                "file": ""
+            },
+            "surf_flux": {
+                "enabled": false,
+                "file": ""
+            },
+            "ir_image": {
+                "enabled": false,
+                "camera": ""
+            }
+        },
+        "advanced": {
+            "diff_algo": 0,
+            "picard_order": 1,
+            "initial_time": 0.0,
+            "disable_intrad": false,
+            "rng_state_in": "",
+            "rng_state_out": "",
+            "extended_results": false
+        },
+        "output": {
+            "dump_model": {
+                "enabled": false,
+                "file": ""
+            },
+            "dump_chunks": {
+                "enabled": false,
+                "prefix": ""
+            },
+            "dump_paths": {
+                "enabled": false,
+                "type": 0,
+                "file": ""
+            },
+            "green_ascii": {
+                "enabled": false
+            },
+            "green_bin": {
+                "enabled": false,
+                "file": "",
+                "end_paths": ""
+            }
+        }
+    }
+}

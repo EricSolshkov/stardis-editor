@@ -1,0 +1,139 @@
+# =========================
+# LLM
+# =========================
+.claude/
+.opencode/
+
+
+# =========================
+# Python
+# =========================
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C extensions
+*.so
+
+# Distribution / packaging
+.Python
+build/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+*.egg-info/
+*.egg
+*.whl
+
+# Installer logs
+pip-log.txt
+pip-delete-this-directory.txt
+
+# =========================
+# Virtual Environment
+# =========================
+venv/
+.venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+
+# =========================
+# PyQt / Qt
+# =========================
+# compiled ui files
+*.pyc
+*.pyo
+
+# Qt Creator
+*.pro.user
+*.pro.user.*
+*.qmake.stash
+*.autosave
+
+# Qt build folders
+build-*/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Makefile
+
+# Qt UI temporary
+*.ui.autosave
+
+# =========================
+# Logs
+# =========================
+*.log
+
+# =========================
+# OS files
+# =========================
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# =========================
+# IDE files
+# =========================
+
+# PyCharm / IntelliJ
+.idea/
+
+# VSCode
+.vscode/
+
+# Visual Studio
+.vs/
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+
+# Xcode
+DerivedData/
+*.xcworkspace
+*.xcuserdata
+*.xcuserstate
+
+# JetBrains Fleet
+.fleet/
+
+# Sublime
+*.sublime-project
+*.sublime-workspace
+
+# Vim
+*.swp
+*.swo
+*~
+
+# =========================
+# Testing / Coverage
+# =========================
+.coverage
+.coverage.*
+.cache
+pytest_cache/
+nosetests.xml
+coverage.xml
+*.cover
+
+# =========================
+# Jupyter
+# =========================
+.ipynb_checkpoints/
+
+# =========================
+# Misc
+# =========================
+*.tmp
+*.bak
+*.old

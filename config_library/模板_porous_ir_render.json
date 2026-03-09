@@ -1,0 +1,59 @@
+{
+    "metadata": {
+        "name": "Porous - 红外图像渲染",
+        "description": "多孔介质红外图像渲染\n基于 Stardis-Starter-Pack/porous/run_IR_rendering.sh\n分辨率: 320x320, SPP: 32\n相机位置: (0.05,0.01,0), 目标: (0,0,0)",
+        "tags": [
+            "starter-pack",
+            "IR",
+            "render",
+            "porous",
+            "imaging"
+        ],
+        "created_time": "2026-02-10T17:10:20.629512",
+        "modified_time": "2026-02-10T17:10:20.629512",
+        "author": "",
+        "source": ""
+    },
+    "config": {
+        "executable": {
+            "stardis_exe_path": "",
+            "working_directory": ""
+        },
+        "basic": {
+            "model_file": "porous.txt",
+            "samples": 0,
+            "threads": 4,
+            "verbosity": 3
+        },
+        "compute_modes": {
+            "ir_image": {
+                "enabled": true,
+                "camera": {
+                    "spp": 32,
+                    "img": {
+                        "w": 320,
+                        "h": 320
+                    },
+                    "fov": 30,
+                    "pos": [
+                        0.05,
+                        0.01,
+                        0
+                    ],
+                    "tgt": [
+                        0,
+                        0,
+                        0
+                    ],
+                    "up": [
+                        0,
+                        0,
+                        1
+                    ]
+                }
+            }
+        },
+        "advanced": {},
+        "output": {}
+    }
+}

@@ -1,0 +1,105 @@
+{
+    "metadata": {
+        "name": "Porous - 红外图像渲染示例",
+        "description": "多孔介质红外图像渲染\n基于 Stardis-Starter-Pack/porous/run_IR_rendering.sh\n\n渲染参数：\n- 图像分辨率: 320x320\n- 每像素采样数 (SPP): 32\n- 视场角 (FOV): 30度\n- 相机位置: (0.05, 0.01, 0)\n- 目标位置: (0, 0, 0)\n- 向上向量: (0, 0, 1)\n\n注意事项：\n1. 此配置使用较低的 SPP (32) 进行快速预览\n2. 对于最终渲染，建议增加 SPP 到 128 或更高\n3. 多孔介质模型通常需要更精细的采样\n4. 可通过调整相机位置获得不同视角",
+        "tags": ["starter-pack", "IR", "render", "porous", "imaging", "example"],
+        "created_time": "2026-02-10T11:00:00",
+        "modified_time": "2026-02-10T11:00:00",
+        "author": "Stardis Editor Team",
+        "source": "Stardis-Starter-Pack/porous/run_IR_rendering.sh"
+    },
+    "config": {
+        "executable": {
+            "stardis_exe_path": "D:/path/to/stardis.exe",
+            "working_directory": "D:/Stardis-Starter-Pack/porous"
+        },
+        "basic": {
+            "model_file": "porous.txt",
+            "samples": 0,
+            "threads": 4,
+            "verbosity": 3
+        },
+        "compute_modes": {
+            "probe_vol": {
+                "enabled": false,
+                "x": 0.0,
+                "y": 0.0,
+                "z": 0.0,
+                "t1": 0.0,
+                "t2": 0.0
+            },
+            "probe_surf": {
+                "enabled": false,
+                "x": 0.0,
+                "y": 0.0,
+                "z": 0.0,
+                "side": ""
+            },
+            "flux_surf": {
+                "enabled": false,
+                "x": 0.0,
+                "y": 0.0,
+                "z": 0.0
+            },
+            "medium_temp": {
+                "enabled": false,
+                "name": ""
+            },
+            "surf_mean_temp": {
+                "enabled": false,
+                "file": ""
+            },
+            "surf_temp_map": {
+                "enabled": false,
+                "file": ""
+            },
+            "surf_flux": {
+                "enabled": false,
+                "file": ""
+            },
+            "ir_image": {
+                "enabled": true,
+                "camera": {
+                    "spp": 32,
+                    "img": {"w": 320, "h": 320},
+                    "fov": 30,
+                    "pos": [0.05, 0.01, 0],
+                    "tgt": [0, 0, 0],
+                    "up": [0, 0, 1]
+                }
+            }
+        },
+        "advanced": {
+            "diff_algo": 0,
+            "picard_order": 1,
+            "initial_time": 0.0,
+            "disable_intrad": false,
+            "rng_state_in": "",
+            "rng_state_out": "",
+            "extended_results": false
+        },
+        "output": {
+            "dump_model": {
+                "enabled": false,
+                "file": ""
+            },
+            "dump_chunks": {
+                "enabled": false,
+                "prefix": ""
+            },
+            "dump_paths": {
+                "enabled": false,
+                "type": 0,
+                "file": ""
+            },
+            "green_ascii": {
+                "enabled": false
+            },
+            "green_bin": {
+                "enabled": false,
+                "file": "",
+                "end_paths": ""
+            }
+        }
+    }
+}
