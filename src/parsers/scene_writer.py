@@ -208,7 +208,7 @@ class SceneWriter:
             writer = vtk.vtkSTLWriter()
             writer.SetFileName(output_path)
             writer.SetInputConnection(surface.GetOutputPort())
-            writer.SetFileTypeToBinary()
+            writer.SetFileTypeToASCII()
             writer.Write()
         except ImportError:
             pass  # VTK 不可用时跳过

@@ -22,6 +22,7 @@ from models.scene_model import (
     BOUNDARY_TYPE_LABELS,
     SceneLight, LightType,
 )
+from panels.task_editors import TaskQueueEditor, TaskEditor
 
 
 def _spin(value=0.0, lo=-1e9, hi=1e9, decimals=4, suffix=""):
@@ -559,6 +560,13 @@ class CameraEditor(QWidget):
 
         self._cam_name = ""
 
+        self.cam_name.textChanged.connect(self.property_changed.emit)
+        for w in (self.pos_x, self.pos_y, self.pos_z,
+                  self.tgt_x, self.tgt_y, self.tgt_z,
+                  self.up_x, self.up_y, self.up_z,
+                  self.fov, self.spp, self.res_w, self.res_h):
+            w.valueChanged.connect(self.property_changed.emit)
+
     def load(self, cam: IRCamera):
         self.blockSignals(True)
         self._cam_name = cam.name
@@ -601,6 +609,8 @@ PAGE_PROBE = 5
 PAGE_CAMERA = 6
 PAGE_LIGHT = 7
 PAGE_AMBIENT = 8
+PAGE_TASK_QUEUE = 9
+PAGE_TASK = 10
 
 
 class LightEditor(QWidget):
@@ -795,6 +805,12 @@ class PropertyPanel(QWidget):
         self.ambient_editor = AmbientEditor()
         self._stack.addWidget(self.ambient_editor)    # 8
 
+        self.task_queue_editor = TaskQueueEditor()
+        self._stack.addWidget(self.task_queue_editor)  # 9
+
+        self.task_editor = TaskEditor()
+        self._stack.addWidget(self.task_editor)        # 10
+
         self._model: SceneModel = SceneModel()
 
         # 内部信号转发
@@ -872,6 +888,25 @@ class PropertyPanel(QWidget):
         self.ambient_editor.load(self._model.ambient_intensity)
         self._stack.setCurrentIndex(PAGE_AMBIENT)
 
+    def show_task_queue(self):
+        self._title.setText("任务队列")
+        self.task_queue_editor.load(self._model.task_queue)
+        self._stack.setCurrentIndex(PAGE_TASK_QUEUE)
+
+    def show_task(self, task_id: str):
+        task = self._find_task(task_id)
+        if not task:
+            return
+        self._title.setText(f"任务: {task.name}")
+        self.task_editor.load(task, self._model)
+        self._stack.setCurrentIndex(PAGE_TASK)
+
+    def _find_task(self, task_id: str):
+        for t in self._model.task_queue.tasks:
+            if t.id == task_id:
+                return t
+        return None
+
     def apply_current(self):
         """将当前编辑器中的值写回模型。"""
         page = self._stack.currentIndex()
@@ -903,3 +938,9 @@ class PropertyPanel(QWidget):
                 self.light_editor.apply_to(light)
         elif page == PAGE_AMBIENT:
             self.ambient_editor.apply_to_model(self._model)
+        elif page == PAGE_TASK_QUEUE:
+            self.task_queue_editor.apply_to(self._model.task_queue)
+        elif page == PAGE_TASK:
+            task = self._find_task(self.task_editor._task_id)
+            if task:
+                self.task_editor.apply_to(task)

@@ -14,6 +14,8 @@ from typing import List, Optional, Tuple, Set, Union
 import json
 import os
 
+from models.task_model import TaskQueue, task_queue_to_dict, dict_to_task_queue
+
 
 # ─── 枚举 ───────────────────────────────────────────────────────
 
@@ -256,6 +258,7 @@ class SceneModel:
     cameras: List[IRCamera] = field(default_factory=list)
     lights: List[SceneLight] = field(default_factory=list)
     ambient_intensity: float = 0.15  # 环境基本光照强度，恒存在
+    task_queue: TaskQueue = field(default_factory=TaskQueue)
 
     def __post_init__(self):
         if not self.cameras:
@@ -369,6 +372,10 @@ class SceneModel:
                 "next_zone_id": body.next_zone_id,
                 "zones": zones_data,
             }
+        # task_queue
+        if self.task_queue.tasks:
+            data["task_queue"] = task_queue_to_dict(self.task_queue)
+
         with open(path, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2, ensure_ascii=False)
 
@@ -383,6 +390,13 @@ class SceneModel:
         if "lights" in data:
             self.lights = [_dict_to_light(d) for d in data["lights"]]
         self.ambient_intensity = data.get("ambient_intensity", 0.15)
+
+        # task_queue
+        tq_data = data.get("task_queue")
+        if tq_data:
+            self.task_queue = dict_to_task_queue(tq_data)
+        else:
+            self.task_queue = TaskQueue()
 
         # 恢复 zone_id / next_zone_id（cell_ids 不在 JSON 中，由三角形哈希匹配恢复）
         body_zone_ids = data.get("body_zone_ids", {})

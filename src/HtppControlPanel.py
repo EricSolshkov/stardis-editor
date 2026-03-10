@@ -22,12 +22,21 @@ from PyQt5.QtCore import QProcess
 class HtppControlPanel(QWidget):
     """htpp 后处理工具控制面板"""
 
-    # 内置调色板列表 (来自 star-cmap 库)
+    # 内置调色板列表 (来自 scmap 库，共 48 个，按字母排序)
     PALETTES = [
-        "inferno", "magma", "plasma", "viridis",
-        "cividis", "turbo", "hot", "cool", "jet",
-        "gray", "bone", "copper", "pink", "spring",
-        "summer", "autumn", "winter", "hsv"
+        "accent", "blues", "brbg", "bugn", "bupu",
+        "chromajs", "dark2",
+        "gnbu", "gnpu", "greens", "greys",
+        "inferno", "jet",
+        "magma", "moreland",
+        "oranges", "orrd",
+        "paired", "parula", "pastel1", "pastel2", "piyg", "plasma",
+        "prgn", "pubu", "pubugn", "puor", "purd", "purples",
+        "rdbu", "rdgy", "rdpu", "rdylbu", "rdylgn", "reds",
+        "sand", "set1", "set2", "set3", "spectral",
+        "viridis",
+        "whgnbu", "whylrd",
+        "ylgn", "ylgnbu", "ylorbr", "ylorrd", "ylrd",
     ]
 
     # 像素分量映射

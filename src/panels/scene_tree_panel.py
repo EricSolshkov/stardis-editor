@@ -5,8 +5,8 @@ S2: 场景树面板
 """
 
 from PyQt5.QtWidgets import QTreeWidget, QTreeWidgetItem, QMenu, QAction, QAbstractItemView
-from PyQt5.QtCore import pyqtSignal, Qt
-from PyQt5.QtGui import QIcon, QColor, QBrush
+from PyQt5.QtCore import pyqtSignal, Qt, QUrl
+from PyQt5.QtGui import QIcon, QColor, QBrush, QDesktopServices
 import sys, os
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 from models.scene_model import (
@@ -14,6 +14,10 @@ from models.scene_model import (
     SolidFluidConnection, SolidSolidConnection, Probe, ProbeType,
     IRCamera, BOUNDARY_TYPE_LABELS,
     SceneLight, LightType,
+)
+from models.task_model import (
+    Task, TaskType, ComputeMode, HtppMode,
+    InputFromTask,
 )
 
 
@@ -36,6 +40,10 @@ NODE_CAMERA   = "camera"
 NODE_LIGHT_GRP = "light_group"
 NODE_LIGHT     = "light"
 NODE_AMBIENT   = "ambient"
+NODE_TASK_GRP  = "task_group"
+NODE_TASK      = "task"
+
+ROLE_TASK_ID   = Qt.UserRole + 4   # 存储 task.id
 
 
 # ─── 边界类型→颜色 ──────────────────────────────────────────────
@@ -77,6 +85,21 @@ class SceneTreePanel(QTreeWidget):
     request_add_spherical_source_prog = pyqtSignal()
     request_delete_light = pyqtSignal(str)
 
+    # 任务相关信号
+    task_queue_selected = pyqtSignal()                # 选中 Tasks 分组
+    task_selected      = pyqtSignal(str)              # 选中单个任务（task_id）
+    request_add_stardis_probe_task  = pyqtSignal()    # 添加探针求解任务
+    request_add_stardis_field_task  = pyqtSignal()    # 添加场求解任务
+    request_add_stardis_ir_task     = pyqtSignal()    # 添加 IR 渲染任务
+    request_add_htpp_image_task     = pyqtSignal()    # 添加 HTPP 图像任务
+    request_add_htpp_map_task       = pyqtSignal()    # 添加 HTPP 映射任务
+    request_delete_task = pyqtSignal(str)             # 删除任务（task_id）
+    request_run_queue   = pyqtSignal()                # 运行全部
+    request_run_task    = pyqtSignal(str)             # 运行单个任务
+    request_clear_tasks = pyqtSignal()                # 清空任务队列
+    request_create_render_tasks = pyqtSignal(str)     # Camera名 → 创建渲染任务组
+    request_create_probe_task   = pyqtSignal(str)     # Probe名 → 创建探针任务
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setHeaderHidden(True)
@@ -86,6 +109,10 @@ class SceneTreePanel(QTreeWidget):
         self.currentItemChanged.connect(self._on_current_changed)
         self.itemDoubleClicked.connect(self._on_item_double_clicked)
         self._model: SceneModel = SceneModel()
+        self._scene_file: str = ""
+
+    def set_scene_file(self, path: str):
+        self._scene_file = path
 
     # ─── 从 SceneModel 重建树 ────────────────────────────────────
 
@@ -170,6 +197,13 @@ class SceneTreePanel(QTreeWidget):
                 l_item.setForeground(0, QBrush(QColor(120, 120, 120)))
             light_grp.addChild(l_item)
 
+        # 7) 任务队列组
+        tasks = model.task_queue.tasks
+        task_grp = self._make_item(f"⚙ 任务 ({len(tasks)})", NODE_TASK_GRP, "")
+        self.addTopLevelItem(task_grp)
+        for idx, task in enumerate(tasks, 1):
+            task_grp.addChild(self._build_task_item(idx, task))
+
         self.blockSignals(False)
         self.expandAll()
 
@@ -190,7 +224,42 @@ class SceneTreePanel(QTreeWidget):
         if item:
             self.setCurrentItem(item)
 
+    def select_task(self, task_id: str):
+        for item in self._iter_all_items():
+            if item.data(0, ROLE_NODE_TYPE) == NODE_TASK and item.data(0, ROLE_TASK_ID) == task_id:
+                self.setCurrentItem(item)
+                return
+
     # ─── 内部 ────────────────────────────────────────────────────
+
+    def _build_task_item(self, idx: int, task: Task) -> QTreeWidgetItem:
+        """构建单个任务的树节点。"""
+        type_label = self._task_type_label(task)
+        text = f"[{idx}] {task.name} ({type_label})"
+        item = self._make_item(text, NODE_TASK, task.name)
+        item.setData(0, ROLE_TASK_ID, task.id)
+        if not task.enabled:
+            item.setForeground(0, QBrush(QColor(128, 128, 128)))
+        return item
+
+    @staticmethod
+    def _task_type_label(task: Task) -> str:
+        if task.task_type == TaskType.STARDIS:
+            mode_map = {
+                ComputeMode.PROBE_SOLVE: "Stardis/Probe",
+                ComputeMode.FIELD_SOLVE: "Stardis/Field",
+                ComputeMode.IR_RENDER:   "Stardis/IR",
+            }
+            return mode_map.get(task.compute_mode, "Stardis")
+        else:
+            mode_map = {
+                HtppMode.IMAGE: "HTPP/Image",
+                HtppMode.MAP:   "HTPP/Map",
+            }
+            suffix = mode_map.get(task.htpp_mode, "HTPP")
+            if isinstance(task.input_source, InputFromTask):
+                suffix += f" ← ..."
+            return suffix
 
     def _make_item(self, text: str, node_type: str, node_name: str) -> QTreeWidgetItem:
         item = QTreeWidgetItem([text])
@@ -221,16 +290,26 @@ class SceneTreePanel(QTreeWidget):
             self.light_selected.emit(nname)
         elif ntype == NODE_AMBIENT:
             self.ambient_selected.emit()
+        elif ntype == NODE_TASK_GRP:
+            self.task_queue_selected.emit()
+        elif ntype == NODE_TASK:
+            task_id = current.data(0, ROLE_TASK_ID)
+            if task_id:
+                self.task_selected.emit(task_id)
         else:
             self.selection_cleared.emit()
 
     def _on_context_menu(self, pos):
         item = self.itemAt(pos)
+        menu = QMenu(self)
+
         if item is None:
+            self._append_open_folder_action(menu)
+            menu.exec_(self.mapToGlobal(pos))
             return
+
         ntype = item.data(0, ROLE_NODE_TYPE)
         nname = item.data(0, ROLE_NODE_NAME)
-        menu = QMenu(self)
 
         if ntype == NODE_BODY_GRP:
             act = menu.addAction("添加几何体...")
@@ -247,6 +326,9 @@ class SceneTreePanel(QTreeWidget):
         elif ntype == NODE_PROBE:
             act = menu.addAction("删除")
             act.triggered.connect(lambda: self.request_delete_probe.emit(nname))
+            menu.addSeparator()
+            act_task = menu.addAction("创建探针计算任务…")
+            act_task.triggered.connect(lambda: self.request_create_probe_task.emit(nname))
         elif ntype == NODE_CONN:
             act = menu.addAction("删除")
             act.triggered.connect(lambda: self.request_delete_conn.emit(nname))
@@ -256,8 +338,11 @@ class SceneTreePanel(QTreeWidget):
             act_view = menu.addAction("从当前视角创建摄像机")
             act_view.triggered.connect(lambda: self.request_add_camera_from_view.emit())
         elif ntype == NODE_CAMERA:
-            act = menu.addAction("删除")
-            act.triggered.connect(lambda: self.request_delete_camera.emit(nname))
+            act_del = menu.addAction("删除")
+            act_del.triggered.connect(lambda: self.request_delete_camera.emit(nname))
+            menu.addSeparator()
+            act_render = menu.addAction("创建渲染任务…")
+            act_render.triggered.connect(lambda: self.request_create_render_tasks.emit(nname))
         elif ntype == NODE_LIGHT_GRP:
             act_def = menu.addAction("添加默认光源")
             act_def.triggered.connect(lambda: self.request_add_default_light.emit())
@@ -268,12 +353,47 @@ class SceneTreePanel(QTreeWidget):
         elif ntype == NODE_LIGHT:
             act = menu.addAction("删除")
             act.triggered.connect(lambda: self.request_delete_light.emit(nname))
-        else:
-            return
+        elif ntype == NODE_TASK_GRP:
+            stardis_menu = menu.addMenu("添加 Stardis 任务")
+            act_probe = stardis_menu.addAction("探针求解")
+            act_probe.triggered.connect(lambda: self.request_add_stardis_probe_task.emit())
+            act_field = stardis_menu.addAction("场求解")
+            act_field.triggered.connect(lambda: self.request_add_stardis_field_task.emit())
+            act_ir = stardis_menu.addAction("IR 渲染")
+            act_ir.triggered.connect(lambda: self.request_add_stardis_ir_task.emit())
+            htpp_menu = menu.addMenu("添加 HTPP 任务")
+            act_img = htpp_menu.addAction("图像模式")
+            act_img.triggered.connect(lambda: self.request_add_htpp_image_task.emit())
+            act_map = htpp_menu.addAction("映射模式")
+            act_map.triggered.connect(lambda: self.request_add_htpp_map_task.emit())
+            menu.addSeparator()
+            act_run = menu.addAction("运行全部")
+            act_run.triggered.connect(lambda: self.request_run_queue.emit())
+            act_clear = menu.addAction("清空任务队列")
+            act_clear.triggered.connect(lambda: self.request_clear_tasks.emit())
+        elif ntype == NODE_TASK:
+            task_id = item.data(0, ROLE_TASK_ID)
+            act_run = menu.addAction("运行此任务")
+            act_run.triggered.connect(lambda: self.request_run_task.emit(task_id))
+            menu.addSeparator()
+            act_del = menu.addAction("删除")
+            act_del.triggered.connect(lambda: self.request_delete_task.emit(task_id))
 
+        self._append_open_folder_action(menu)
         menu.exec_(self.mapToGlobal(pos))
 
     # ─── 查找辅助 ────────────────────────────────────────────────
+
+    def _append_open_folder_action(self, menu: QMenu):
+        """在菜单末尾追加「打开场景文件目录」选项。"""
+        if menu.actions():
+            menu.addSeparator()
+        act = menu.addAction("打开场景文件目录")
+        if self._scene_file:
+            folder = os.path.dirname(os.path.abspath(self._scene_file))
+            act.triggered.connect(lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(folder)))
+        else:
+            act.setEnabled(False)
 
     def _find_item(self, node_type: str, name: str) -> QTreeWidgetItem:
         it = self._iter_all_items()

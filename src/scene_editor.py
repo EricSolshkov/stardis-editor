@@ -12,6 +12,7 @@ from PyQt5.QtWidgets import (
     QMainWindow, QSplitter, QFileDialog, QMenuBar, QAction,
     QMessageBox, QApplication, QWidget, QVBoxLayout,
     QDialog, QFormLayout, QComboBox, QDialogButtonBox, QLabel,
+    QPlainTextEdit,
 )
 from PyQt5.QtCore import Qt
 
@@ -23,11 +24,20 @@ from models.scene_model import (
     Probe, ProbeType, BodyType, Side, ImportedSTL, PaintedRegion, IRCamera,
     SceneLight, LightType,
 )
+from models.task_model import (
+    Task, TaskType, ComputeMode, HtppMode,
+    StardisParams, HtppParams,
+    InputFromTask, InputFromFile,
+    create_stardis_task, create_htpp_task,
+)
 from panels.scene_tree_panel import SceneTreePanel
 from panels.property_panel import PropertyPanel
 from viewport.scene_viewport import SceneViewport
 from parsers.scene_parser import SceneParser
 from parsers.scene_writer import SceneWriter
+from models.editor_preferences import EditorPreferences, StartupBehavior
+from panels.preferences_dialog import PreferencesDialog
+from task_runner.task_runner import TaskRunner, SceneValidator, resolve_all, resolve_exe_ref, ValidationError
 
 
 class SceneEditor(QMainWindow):
@@ -42,11 +52,22 @@ class SceneEditor(QMainWindow):
         self._scene_file: str = ""   # 当前打开的 .txt 路径
         self._parser = SceneParser()
         self._writer = SceneWriter()
+        self._task_runner = TaskRunner(self)  # 任务调度器
+        self._validator = SceneValidator(self)  # 场景验证器
+
+        # 偏好设置
+        self._project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+        self._prefs_path = os.path.join(self._project_root, 'editor_settings.json')
+        legacy_path = os.path.join(self._project_root, 'user_settings.json')
+        self._prefs = EditorPreferences.load_or_migrate(self._prefs_path, legacy_path)
 
         self._build_ui()
         self._build_menus()
         self._connect_signals()
+        self._validator.validation_finished.connect(self._on_validation_finished)
+        self._props.task_editor.set_preferences(self._prefs)
         self._refresh_all()
+        self._apply_startup_behavior()
 
     # ─── UI 布局 ─────────────────────────────────────────────────
 
@@ -99,10 +120,22 @@ class SceneEditor(QMainWindow):
         file_menu.addAction(save_as_act)
 
         file_menu.addSeparator()
+
+        # 最近工程子菜单
+        self._recent_menu = file_menu.addMenu("最近工程")
+        self._rebuild_recent_menu()
+
+        file_menu.addSeparator()
         exit_act = QAction("退出", self)
         exit_act.setShortcut("Ctrl+Q")
         exit_act.triggered.connect(self.close)
         file_menu.addAction(exit_act)
+
+        # 编辑菜单 → 偏好设置
+        edit_menu = mb.addMenu("编辑")
+        prefs_act = QAction("偏好设置...", self)
+        prefs_act.triggered.connect(self._open_preferences)
+        edit_menu.addAction(prefs_act)
 
         # 场景菜单
         scene_menu = mb.addMenu("场景")
@@ -111,9 +144,9 @@ class SceneEditor(QMainWindow):
         add_body_act.triggered.connect(self._on_add_body)
         scene_menu.addAction(add_body_act)
 
-        validate_act = QAction("验证场景 (stub)", self)
-        validate_act.triggered.connect(self._on_validate)
-        scene_menu.addAction(validate_act)
+        self._validate_act = QAction("验证场景", self)
+        self._validate_act.triggered.connect(self._on_validate)
+        scene_menu.addAction(self._validate_act)
 
     # ─── 信号连接 ────────────────────────────────────────────────
 
@@ -149,6 +182,40 @@ class SceneEditor(QMainWindow):
         tree.request_add_spherical_source_prog.connect(self._on_add_spherical_source_prog)
         tree.request_delete_light.connect(self._on_delete_light)
 
+        # 任务相关信号
+        tree.task_queue_selected.connect(self._on_tree_task_queue_selected)
+        tree.task_selected.connect(self._on_tree_task_selected)
+        tree.request_add_stardis_probe_task.connect(
+            lambda: self._add_task_by_type(TaskType.STARDIS, ComputeMode.PROBE_SOLVE))
+        tree.request_add_stardis_field_task.connect(
+            lambda: self._add_task_by_type(TaskType.STARDIS, ComputeMode.FIELD_SOLVE))
+        tree.request_add_stardis_ir_task.connect(
+            lambda: self._add_task_by_type(TaskType.STARDIS, ComputeMode.IR_RENDER))
+        tree.request_add_htpp_image_task.connect(
+            lambda: self._add_task_by_type(TaskType.HTPP, None, HtppMode.IMAGE))
+        tree.request_add_htpp_map_task.connect(
+            lambda: self._add_task_by_type(TaskType.HTPP, None, HtppMode.MAP))
+        tree.request_delete_task.connect(self._on_delete_task)
+        tree.request_run_queue.connect(self._on_run_queue)
+        tree.request_run_task.connect(self._on_run_task)
+        tree.request_clear_tasks.connect(self._on_clear_tasks)
+        tree.request_create_render_tasks.connect(self._on_create_render_tasks)
+        tree.request_create_probe_task.connect(self._on_create_probe_task)
+
+        # 任务编辑器信号
+        props.task_queue_editor.property_changed.connect(lambda: self._apply_and_refresh_tree())
+        props.task_editor.property_changed.connect(lambda: self._apply_and_refresh_tree())
+        props.task_queue_editor.request_run_queue.connect(self._on_run_queue)
+        props.task_editor.request_run_task.connect(self._on_run_task)
+
+        # TaskRunner 信号
+        self._task_runner.queue_started.connect(self._on_queue_started)
+        self._task_runner.queue_finished.connect(self._on_queue_finished)
+        self._task_runner.task_started.connect(self._on_task_started)
+        self._task_runner.task_finished.connect(self._on_task_finished)
+        self._task_runner.task_output.connect(self._on_task_output)
+        self._task_runner.task_error_output.connect(self._on_task_error_output)
+
         # 视口 → 场景树 + 属性面板
         vp.body_picked.connect(self._on_vp_body_picked)
         vp.probe_picked.connect(self._on_vp_probe_picked)
@@ -168,23 +235,30 @@ class SceneEditor(QMainWindow):
         props.probe_editor.property_changed.connect(lambda: self._apply_and_refresh_tree())
         props.light_editor.property_changed.connect(lambda: self._apply_and_refresh_lights())
         props.ambient_editor.property_changed.connect(lambda: self._apply_and_refresh_ambient())
+        props.camera_editor.property_changed.connect(lambda: self._apply_and_refresh_tree())
 
     # ─── 文件操作 ────────────────────────────────────────────────
 
     def new_scene(self):
         self._model = SceneModel()
         self._scene_file = ""
+        self._tree.set_scene_file("")
         self._refresh_all()
         self.setWindowTitle("Stardis Scene Editor - 新建场景")
 
-    def open_scene(self):
-        path, _ = QFileDialog.getOpenFileName(
-            self, "打开场景文件", "", "Stardis 场景 (*.txt);;所有文件 (*)")
+    def open_scene(self, path: str = ""):
         if not path:
+            path, _ = QFileDialog.getOpenFileName(
+                self, "打开场景文件", "", "Stardis 场景 (*.txt);;所有文件 (*)")
+        if not path:
+            return
+        if not os.path.isfile(path):
+            QMessageBox.warning(self, "打开失败", f"文件不存在:\n{path}")
             return
         self._parser = SceneParser()
         self._model = self._parser.parse_file(path)
         self._scene_file = path
+        self._tree.set_scene_file(path)
 
         # 处理需要用户手动指定父体的边界
         if self._parser.unresolved_boundaries:
@@ -198,6 +272,12 @@ class SceneEditor(QMainWindow):
         self._refresh_all()
         self.setWindowTitle(f"Stardis Scene Editor - {os.path.basename(path)}")
 
+        # 记录到最近工程
+        self._prefs.add_recent_project(path)
+        self._prefs.last_project_path = path
+        self._save_prefs()
+        self._rebuild_recent_menu()
+
     def save_scene(self):
         if not self._scene_file:
             return self.save_scene_as()
@@ -210,6 +290,7 @@ class SceneEditor(QMainWindow):
         if not path:
             return
         self._scene_file = path
+        self._tree.set_scene_file(path)
         self._do_save(os.path.dirname(path), os.path.basename(path))
         self.setWindowTitle(f"Stardis Scene Editor - {os.path.basename(path)}")
 
@@ -218,6 +299,55 @@ class SceneEditor(QMainWindow):
         self._writer.save(self._model, output_dir, filename)
         QMessageBox.information(self, "保存成功",
                                 f"场景已保存到:\n{os.path.join(output_dir, filename)}")
+        # 记录当前工程路径
+        full = os.path.join(output_dir, filename)
+        self._prefs.add_recent_project(full)
+        self._prefs.last_project_path = full
+        self._save_prefs()
+        self._rebuild_recent_menu()
+
+    # ─── 偏好设置 ────────────────────────────────────────────────
+
+    def _save_prefs(self):
+        try:
+            self._prefs.save(self._prefs_path)
+        except Exception:
+            pass
+
+    def _apply_startup_behavior(self):
+        """根据偏好设置决定启动时行为。"""
+        if self._prefs.startup_behavior == StartupBehavior.OPEN_LAST:
+            path = self._prefs.last_project_path
+            if path and os.path.isfile(path):
+                self.open_scene(path)
+
+    def _rebuild_recent_menu(self):
+        """刷新 '最近工程' 子菜单。"""
+        self._recent_menu.clear()
+        for p in self._prefs.recent_projects:
+            act = QAction(p, self)
+            act.triggered.connect(lambda checked, path=p: self.open_scene(path))
+            self._recent_menu.addAction(act)
+        if not self._prefs.recent_projects:
+            act = QAction("（无）", self)
+            act.setEnabled(False)
+            self._recent_menu.addAction(act)
+
+    def _open_preferences(self):
+        dlg = PreferencesDialog(self._prefs, self)
+        if dlg.exec_() == QDialog.Accepted:
+            self._save_prefs()
+            self._rebuild_recent_menu()
+            self._props.task_editor.set_preferences(self._prefs)
+
+    def closeEvent(self, event):
+        """关闭时保存当前工程路径到偏好设置。"""
+        if self._scene_file:
+            self._prefs.last_project_path = self._scene_file
+        self._save_prefs()
+        super().closeEvent(event)
+
+    # ─── 边界归属解析 ────────────────────────────────────────────
 
     def _resolve_boundary_parents(self):
         """
@@ -541,14 +671,51 @@ class SceneEditor(QMainWindow):
         """涂选结果写回模型后刷新树。"""
         self._tree.rebuild(self._model)
 
-    # ─── 验证 (stub) ────────────────────────────────────────────
+    # ─── 场景验证 ────────────────────────────────────────────────
 
     def _on_validate(self):
-        ok, msgs = self._model.validate()
-        if ok:
-            QMessageBox.information(self, "验证结果", "✅ 场景验证通过 (stub)")
-        else:
-            QMessageBox.warning(self, "验证结果", "\n".join(msgs))
+        if not self._scene_file or not os.path.isfile(self._scene_file):
+            QMessageBox.warning(self, "验证场景",
+                                "请先保存场景文件（Ctrl+S），验证需要已保存的 .txt 场景文件。")
+            return
+        if self._validator.is_running:
+            QMessageBox.information(self, "验证场景", "场景验证正在进行中，请稍候。")
+            return
+        stardis_exe = self._resolve_stardis_exe()
+        if not stardis_exe:
+            return
+        working_dir = os.path.dirname(self._scene_file)
+        scene_file = os.path.basename(self._scene_file)
+        self._validate_act.setEnabled(False)
+        self._validate_act.setText("验证中...")
+        self._validator.validate(stardis_exe, scene_file, working_dir)
+
+    def _resolve_stardis_exe(self) -> str:
+        """从偏好设置的 exe_tags 中查找 stardis 可执行文件，找不到则弹窗选择。"""
+        for label, path in self._prefs.exe_tags.items():
+            if "stardis" in label.lower() and os.path.isfile(path):
+                return path
+        path, _ = QFileDialog.getOpenFileName(
+            self, "选择 stardis 可执行文件", "",
+            "可执行文件 (*.exe);;所有文件 (*)")
+        return path
+
+    def _on_validation_finished(self, text: str, exit_code: int):
+        self._validate_act.setEnabled(True)
+        self._validate_act.setText("验证场景")
+        title = "✅ 场景验证通过" if exit_code == 0 else f"❌ 场景验证失败 (exit {exit_code})"
+        dlg = QDialog(self)
+        dlg.setWindowTitle(title)
+        dlg.resize(720, 500)
+        layout = QVBoxLayout(dlg)
+        out = QPlainTextEdit(dlg)
+        out.setReadOnly(True)
+        out.setPlainText(text)
+        layout.addWidget(out)
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok)
+        buttons.accepted.connect(dlg.accept)
+        layout.addWidget(buttons)
+        dlg.exec_()
 
     # ─── 刷新 ────────────────────────────────────────────────────
 
@@ -562,6 +729,216 @@ class SceneEditor(QMainWindow):
         """属性面板值变化后写回模型并刷新树。"""
         self._props.apply_current()
         self._tree.rebuild(self._model)
+
+    # ─── 任务管理 ────────────────────────────────────────────────
+
+    def _on_tree_task_queue_selected(self):
+        self._viewport.clear_highlight()
+        self._props.show_task_queue()
+
+    def _on_tree_task_selected(self, task_id):
+        self._viewport.clear_highlight()
+        self._props.show_task(task_id)
+
+    def _default_model_file(self) -> str:
+        """返回当前场景文件名（用作新任务的默认 -M 值）。"""
+        return os.path.basename(self._scene_file) if self._scene_file else ""
+
+    def _default_exe_ref(self, task_type) -> str:
+        """为新任务查找默认可执行文件标签。"""
+        keyword = "stardis" if task_type == TaskType.STARDIS else "htpp"
+        for label in self._prefs.exe_tags:
+            if keyword in label.lower():
+                return label
+        return ""
+
+    def _add_task_by_type(self, task_type, compute_mode=None, htpp_mode=None):
+        """通用添加任务到队列。"""
+        exe_ref = self._default_exe_ref(task_type)
+        if task_type == TaskType.STARDIS:
+            mode_names = {
+                ComputeMode.PROBE_SOLVE: "探针求解",
+                ComputeMode.FIELD_SOLVE: "场求解",
+                ComputeMode.IR_RENDER:   "IR渲染",
+            }
+            name = f"{mode_names.get(compute_mode, 'Stardis')}-{len(self._model.task_queue.tasks)+1}"
+            task = Task(
+                name=name,
+                task_type=TaskType.STARDIS,
+                compute_mode=compute_mode,
+                stardis_params=StardisParams(model_file=self._default_model_file()),
+                exe_ref=exe_ref,
+            )
+        else:
+            mode_names = {HtppMode.IMAGE: "图像", HtppMode.MAP: "映射"}
+            name = f"HTPP-{mode_names.get(htpp_mode, '')}-{len(self._model.task_queue.tasks)+1}"
+            task = Task(
+                name=name,
+                task_type=TaskType.HTPP,
+                htpp_mode=htpp_mode,
+                htpp_params=HtppParams(),
+                exe_ref=exe_ref,
+            )
+        self._model.task_queue.tasks.append(task)
+        self._tree.rebuild(self._model)
+        self._tree.select_task(task.id)
+        self._props.show_task(task.id)
+
+    def _on_delete_task(self, task_id):
+        tasks = self._model.task_queue.tasks
+        self._model.task_queue.tasks = [t for t in tasks if t.id != task_id]
+        self._tree.rebuild(self._model)
+        self._props.show_empty()
+
+    def _on_clear_tasks(self):
+        if not self._model.task_queue.tasks:
+            return
+        reply = QMessageBox.question(
+            self, "清空任务队列",
+            f"确定清空所有 {len(self._model.task_queue.tasks)} 个任务？",
+            QMessageBox.Yes | QMessageBox.No)
+        if reply == QMessageBox.Yes:
+            self._model.task_queue.tasks.clear()
+            self._tree.rebuild(self._model)
+            self._props.show_empty()
+
+    def _on_create_render_tasks(self, camera_name):
+        """Camera 右键 → 创建 Stardis IR + HTPP 任务组。"""
+        cam = self._model.get_camera_by_name(camera_name)
+        if not cam:
+            return
+
+        # 1) Stardis IR 任务
+        ir_task = Task(
+            name=f"IR渲染-{camera_name}",
+            task_type=TaskType.STARDIS,
+            compute_mode=ComputeMode.IR_RENDER,
+            stardis_params=StardisParams(
+                camera_ref=camera_name,
+                model_file=self._default_model_file(),
+            ),
+            exe_ref=self._default_exe_ref(TaskType.STARDIS),
+        )
+        self._model.task_queue.tasks.append(ir_task)
+
+        # 2) HTPP 映射任务（引用 IR 任务输出）
+        htpp_task = Task(
+            name=f"后处理-{camera_name}",
+            task_type=TaskType.HTPP,
+            htpp_mode=HtppMode.MAP,
+            htpp_params=HtppParams(),
+            input_source=InputFromTask(task_id=ir_task.id),
+            exe_ref=self._default_exe_ref(TaskType.HTPP),
+        )
+        self._model.task_queue.tasks.append(htpp_task)
+
+        self._tree.rebuild(self._model)
+        self._tree.select_task(ir_task.id)
+        self._props.show_task(ir_task.id)
+
+    def _on_create_probe_task(self, probe_name):
+        """Probe 右键 → 创建探针计算任务。"""
+        task = Task(
+            name=f"探针计算-{probe_name}",
+            task_type=TaskType.STARDIS,
+            compute_mode=ComputeMode.PROBE_SOLVE,
+            stardis_params=StardisParams(
+                probe_refs=[probe_name],
+                model_file=self._default_model_file(),
+            ),
+            exe_ref=self._default_exe_ref(TaskType.STARDIS),
+        )
+        self._model.task_queue.tasks.append(task)
+        self._tree.rebuild(self._model)
+        self._tree.select_task(task.id)
+        self._props.show_task(task.id)
+
+    # ─── 任务执行 ────────────────────────────────────────────────
+
+    def _on_run_queue(self):
+        """运行全部任务。"""
+        if self._task_runner.is_running:
+            QMessageBox.warning(self, "任务运行中", "已有任务正在执行，请等待完成。")
+            return
+        self._props.apply_current()
+        scene_dir = os.path.dirname(self._scene_file) if self._scene_file else ""
+        try:
+            resolved = resolve_all(
+                self._model.task_queue, self._model, self._prefs, scene_dir)
+        except ValidationError as e:
+            QMessageBox.warning(self, "任务校验失败", str(e))
+            return
+        if not resolved:
+            QMessageBox.information(self, "无任务", "队列中没有已启用的任务。")
+            return
+        self._task_runner.run_queue(resolved, self._model.task_queue.error_policy)
+
+    def _on_run_task(self, task_id):
+        """运行单个任务。"""
+        if self._task_runner.is_running:
+            QMessageBox.warning(self, "任务运行中", "已有任务正在执行，请等待完成。")
+            return
+        self._props.apply_current()
+        task = None
+        for t in self._model.task_queue.tasks:
+            if t.id == task_id:
+                task = t
+                break
+        if not task:
+            return
+        from models.task_model import TaskQueue
+        single_queue = TaskQueue(tasks=[task])
+        scene_dir = os.path.dirname(self._scene_file) if self._scene_file else ""
+        try:
+            resolved = resolve_all(single_queue, self._model, self._prefs, scene_dir)
+        except ValidationError as e:
+            QMessageBox.warning(self, "任务校验失败", str(e))
+            return
+        if resolved:
+            self._task_runner.run_single(resolved[0])
+
+    def _on_queue_started(self):
+        self._props.task_queue_editor.set_status("队列运行中...")
+        self._props.task_queue_editor.clear_log()
+        self._props.task_queue_editor.append_system_log("队列执行开始")
+
+    def _on_queue_finished(self, all_success):
+        status = "全部完成 ✓" if all_success else "队列结束（有失败）"
+        self._props.task_queue_editor.set_status(status)
+        self._props.task_queue_editor.append_system_log(status)
+        self._tree.rebuild(self._model)
+
+    def _on_task_started(self, task_id):
+        name = self._task_name_by_id(task_id)
+        self._props.task_queue_editor.append_system_log(f"任务 '{name}' 开始")
+        if self._props.task_editor._task_id == task_id:
+            self._props.task_editor.clear_log()
+            self._props.task_editor.append_system_log(f"任务 '{name}' 开始")
+
+    def _on_task_finished(self, task_id, exit_code):
+        name = self._task_name_by_id(task_id)
+        msg = f"任务 '{name}' 完成 (exit={exit_code})"
+        self._props.task_queue_editor.append_system_log(msg)
+        if self._props.task_editor._task_id == task_id:
+            self._props.task_editor.append_system_log(msg)
+
+    def _on_task_output(self, task_id, text):
+        name = self._task_name_by_id(task_id)
+        self._props.task_queue_editor.append_log(name, text, is_error=False)
+        if self._props.task_editor._task_id == task_id:
+            self._props.task_editor.append_log(text, is_error=False)
+
+    def _on_task_error_output(self, task_id, text):
+        name = self._task_name_by_id(task_id)
+        self._props.task_queue_editor.append_log(name, text, is_error=True)
+        if self._props.task_editor._task_id == task_id:
+            self._props.task_editor.append_log(text, is_error=True)
+
+    def _task_name_by_id(self, task_id: str) -> str:
+        for t in self._model.task_queue.tasks:
+            if t.id == task_id:
+                return t.name
+        return task_id
 
 
 # ─── 入口 ────────────────────────────────────────────────────────
