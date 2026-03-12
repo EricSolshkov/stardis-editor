@@ -67,7 +67,9 @@ class TestTaskSerialization:
                 model_file="scene.txt",
                 field_solve=FieldSolveConfig(
                     solve_type=FieldSolveType.SURF_TEMP_MAP,
-                    solve_file="surf_temp.dat",
+                    surface_stl="surf_temp.stl",
+                    time_start=10.0,
+                    time_end=60.0,
                 ),
             ),
         )
@@ -76,7 +78,21 @@ class TestTaskSerialization:
         assert recovered.compute_mode == ComputeMode.FIELD_SOLVE
         fs = recovered.stardis_params.field_solve
         assert fs.solve_type == FieldSolveType.SURF_TEMP_MAP
-        assert fs.solve_file == "surf_temp.dat"
+        assert fs.surface_stl == "surf_temp.stl"
+        assert fs.time_start == 10.0
+        assert fs.time_end == 60.0
+
+    def test_field_solve_backward_compat(self):
+        """旧版 JSON 使用 solve_file 键名应能正确读取。"""
+        d = {
+            "solve_type": "surf_flux",
+            "medium_name": "",
+            "solve_file": "old_flux.stl",
+        }
+        from models.task_model import _dict_to_field_solve
+        fs = _dict_to_field_solve(d)
+        assert fs.surface_stl == "old_flux.stl"
+        assert fs.time_start is None
 
     def test_advanced_options_roundtrip(self):
         adv = AdvancedOptions(

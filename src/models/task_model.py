@@ -84,7 +84,9 @@ class AdvancedOptions:
 class FieldSolveConfig:
     solve_type: FieldSolveType = FieldSolveType.MEDIUM_TEMP
     medium_name: str = ""              # -m: 介质名称
-    solve_file: str = ""               # -s/-S/-F: 求解文件路径
+    surface_stl: str = ""              # -s/-S/-F: 输入 STL 文件路径（定义计算表面）
+    time_start: Optional[float] = None # 可选起始时间（秒），None = 不传
+    time_end: Optional[float] = None   # 可选结束时间（秒），None = 不传
 
 
 @dataclass
@@ -178,7 +180,9 @@ def _field_solve_to_dict(fs: FieldSolveConfig) -> dict:
     return {
         "solve_type": fs.solve_type.value,
         "medium_name": fs.medium_name,
-        "solve_file": fs.solve_file,
+        "surface_stl": fs.surface_stl,
+        "time_start": fs.time_start,
+        "time_end": fs.time_end,
     }
 
 
@@ -264,10 +268,14 @@ def _dict_to_advanced(d: dict) -> AdvancedOptions:
 
 
 def _dict_to_field_solve(d: dict) -> FieldSolveConfig:
+    # 向后兼容：旧版 JSON 使用 "solve_file" 键名
+    surface = d.get("surface_stl") or d.get("solve_file", "")
     return FieldSolveConfig(
         solve_type=FieldSolveType(d.get("solve_type", "medium_temp")),
         medium_name=d.get("medium_name", ""),
-        solve_file=d.get("solve_file", ""),
+        surface_stl=surface,
+        time_start=d.get("time_start"),
+        time_end=d.get("time_end"),
     )
 
 

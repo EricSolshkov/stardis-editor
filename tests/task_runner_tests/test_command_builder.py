@@ -112,13 +112,47 @@ class TestBuildStardisField:
         assert args[args.index('-m') + 1] == 'air'
 
     def test_surf_flux(self):
-        fs = FieldSolveConfig(solve_type=FieldSolveType.SURF_FLUX, solve_file="flux.dat")
+        fs = FieldSolveConfig(solve_type=FieldSolveType.SURF_FLUX, surface_stl="flux.stl")
         params = StardisParams(model_file="s.txt", samples=10, field_solve=fs)
         args = CommandBuilder.build_stardis(
             "s.txt", ComputeMode.FIELD_SOLVE, params,
         )
         assert '-F' in args
-        assert args[args.index('-F') + 1] == 'flux.dat'
+        assert args[args.index('-F') + 1] == 'flux.stl'
+
+    def test_medium_temp_with_time_start(self):
+        fs = FieldSolveConfig(
+            solve_type=FieldSolveType.MEDIUM_TEMP, medium_name="air",
+            time_start=30.0,
+        )
+        params = StardisParams(model_file="s.txt", samples=10, field_solve=fs)
+        args = CommandBuilder.build_stardis(
+            "s.txt", ComputeMode.FIELD_SOLVE, params,
+        )
+        assert args[args.index('-m') + 1] == 'air,30.0'
+
+    def test_surf_temp_map_with_time_range(self):
+        fs = FieldSolveConfig(
+            solve_type=FieldSolveType.SURF_TEMP_MAP, surface_stl="surf.stl",
+            time_start=0.0, time_end=60.0,
+        )
+        params = StardisParams(model_file="s.txt", samples=10, field_solve=fs)
+        args = CommandBuilder.build_stardis(
+            "s.txt", ComputeMode.FIELD_SOLVE, params,
+        )
+        assert '-S' in args
+        assert args[args.index('-S') + 1] == 'surf.stl,0.0,60.0'
+
+    def test_surf_mean_temp_no_time(self):
+        fs = FieldSolveConfig(
+            solve_type=FieldSolveType.SURF_MEAN_TEMP, surface_stl="srf.stl",
+        )
+        params = StardisParams(model_file="s.txt", samples=10, field_solve=fs)
+        args = CommandBuilder.build_stardis(
+            "s.txt", ComputeMode.FIELD_SOLVE, params,
+        )
+        assert '-s' in args
+        assert args[args.index('-s') + 1] == 'srf.stl'
 
 
 class TestBuildAdvancedOptions:

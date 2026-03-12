@@ -135,14 +135,29 @@ class CommandBuilder:
     @staticmethod
     def _build_field_args(fs: FieldSolveConfig) -> List[str]:
         if fs.solve_type == FieldSolveType.MEDIUM_TEMP:
-            return ['-m', fs.medium_name]
+            val = fs.medium_name
         elif fs.solve_type == FieldSolveType.SURF_MEAN_TEMP:
-            return ['-s', fs.solve_file]
+            val = fs.surface_stl
         elif fs.solve_type == FieldSolveType.SURF_TEMP_MAP:
-            return ['-S', fs.solve_file]
+            val = fs.surface_stl
         elif fs.solve_type == FieldSolveType.SURF_FLUX:
-            return ['-F', fs.solve_file]
-        return []
+            val = fs.surface_stl
+        else:
+            return []
+
+        # 追加可选时间范围: val[,t1[,t2]]
+        if fs.time_start is not None:
+            val = f"{val},{fs.time_start}"
+            if fs.time_end is not None:
+                val = f"{val},{fs.time_end}"
+
+        flag = {
+            FieldSolveType.MEDIUM_TEMP: '-m',
+            FieldSolveType.SURF_MEAN_TEMP: '-s',
+            FieldSolveType.SURF_TEMP_MAP: '-S',
+            FieldSolveType.SURF_FLUX: '-F',
+        }[fs.solve_type]
+        return [flag, val]
 
     # ─── 高级选项 ────────────────────────────────────────────────
 

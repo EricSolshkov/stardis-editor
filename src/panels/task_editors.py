@@ -365,9 +365,22 @@ class TaskEditor(QWidget):
         self._medium_name_label = QLabel("介质名称:")
         self._medium_name = QLineEdit()
         stardis_form.addRow(self._medium_name_label, self._medium_name)
-        self._solve_file_label = QLabel("求解文件:")
-        self._solve_file = QLineEdit()
-        stardis_form.addRow(self._solve_file_label, self._solve_file)
+        self._surface_stl_label = QLabel("表面 STL (-s/-S/-F):")
+        self._surface_stl = QLineEdit()
+        self._surface_stl.setToolTip(
+            "输入 STL 文件路径，定义计算表面（必须是模型几何的子集）。\n"
+            "计算结果输出到 stdout，需配合 stdout 输出文件捕获。")
+        stardis_form.addRow(self._surface_stl_label, self._surface_stl)
+        self._field_time_chk = QCheckBox("启用时间范围")
+        self._field_time_chk.setToolTip("勾选后指定可选时间范围 [t_start, t_end]")
+        stardis_form.addRow("", self._field_time_chk)
+        self._field_time_start_label = QLabel("起始时间 (s):")
+        self._field_time_start = _spin(0.0, 0, 1e12, 6)
+        stardis_form.addRow(self._field_time_start_label, self._field_time_start)
+        self._field_time_end_label = QLabel("结束时间 (s):")
+        self._field_time_end = _spin(0.0, 0, 1e12, 6)
+        stardis_form.addRow(self._field_time_end_label, self._field_time_end)
+        self._field_time_chk.toggled.connect(self._on_field_time_toggled)
 
         # 输出重定向
         self._output_redirect = QLineEdit()
@@ -492,7 +505,9 @@ class TaskEditor(QWidget):
         self._probe_list.itemChanged.connect(self.property_changed.emit)
         self._field_type.currentIndexChanged.connect(self.property_changed.emit)
         self._medium_name.textChanged.connect(self.property_changed.emit)
-        self._solve_file.textChanged.connect(self.property_changed.emit)
+        self._surface_stl.textChanged.connect(self.property_changed.emit)
+        self._field_time_start.valueChanged.connect(self.property_changed.emit)
+        self._field_time_end.valueChanged.connect(self.property_changed.emit)
         self._output_redirect.textChanged.connect(self.property_changed.emit)
         self._stderr_redirect.textChanged.connect(self.property_changed.emit)
 
@@ -618,8 +633,13 @@ class TaskEditor(QWidget):
         self._field_type.setVisible(is_field)
         self._medium_name_label.setVisible(is_field)
         self._medium_name.setVisible(is_field)
-        self._solve_file_label.setVisible(is_field)
-        self._solve_file.setVisible(is_field)
+        self._surface_stl_label.setVisible(is_field)
+        self._surface_stl.setVisible(is_field)
+        self._field_time_chk.setVisible(is_field)
+        self._field_time_start_label.setVisible(is_field)
+        self._field_time_start.setVisible(is_field)
+        self._field_time_end_label.setVisible(is_field)
+        self._field_time_end.setVisible(is_field)
 
         if is_ir:
             self._camera_ref.clear()
@@ -648,7 +668,15 @@ class TaskEditor(QWidget):
             }
             self._field_type.setCurrentIndex(type_map.get(fs.solve_type, 0))
             self._medium_name.setText(fs.medium_name)
-            self._solve_file.setText(fs.solve_file)
+            self._surface_stl.setText(fs.surface_stl)
+            has_time = fs.time_start is not None
+            self._field_time_chk.setChecked(has_time)
+            self._field_time_start.setValue(fs.time_start if fs.time_start is not None else 0.0)
+            self._field_time_end.setValue(fs.time_end if fs.time_end is not None else 0.0)
+            self._field_time_start.setEnabled(has_time)
+            self._field_time_end.setEnabled(has_time)
+            self._field_time_start_label.setEnabled(has_time)
+            self._field_time_end_label.setEnabled(has_time)
 
     def _load_htpp(self, task: Task, model: SceneModel):
         hp = task.htpp_params or HtppParams()
@@ -754,7 +782,13 @@ class TaskEditor(QWidget):
             fs.solve_type = [FieldSolveType.MEDIUM_TEMP, FieldSolveType.SURF_MEAN_TEMP,
                              FieldSolveType.SURF_TEMP_MAP, FieldSolveType.SURF_FLUX][idx]
             fs.medium_name = self._medium_name.text()
-            fs.solve_file = self._solve_file.text()
+            fs.surface_stl = self._surface_stl.text()
+            if self._field_time_chk.isChecked():
+                fs.time_start = self._field_time_start.value()
+                fs.time_end = self._field_time_end.value() if self._field_time_end.value() > 0 else None
+            else:
+                fs.time_start = None
+                fs.time_end = None
 
     def _apply_htpp(self, task: Task):
         if not task.htpp_params:
@@ -789,6 +823,13 @@ class TaskEditor(QWidget):
             hp.gnuplot = self._gnuplot.isChecked()
 
     # ─── HTPP 联动槽 ────────────────────────────────────────────
+
+    def _on_field_time_toggled(self, checked):
+        self._field_time_start.setEnabled(checked)
+        self._field_time_end.setEnabled(checked)
+        self._field_time_start_label.setEnabled(checked)
+        self._field_time_end_label.setEnabled(checked)
+        self.property_changed.emit()
 
     def _on_white_auto_toggled(self, checked):
         self._white_scale.setEnabled(not checked)
