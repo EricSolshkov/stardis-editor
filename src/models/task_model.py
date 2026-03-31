@@ -71,7 +71,7 @@ class ErrorPolicy:
 
 @dataclass
 class AdvancedOptions:
-    diff_algorithm: str = ""           # -a: 扩散算法
+    diff_algorithm: str = "dsphere"    # -a: 传导步算法 (dsphere|wos)
     picard_order: int = 1              # -o: Picard 阶数
     initial_time: float = 0.0          # -I: 初始时间
     disable_intrad: bool = False       # -i: 禁用内部辐射
@@ -257,7 +257,7 @@ def task_queue_to_dict(queue: TaskQueue) -> dict:
 
 def _dict_to_advanced(d: dict) -> AdvancedOptions:
     return AdvancedOptions(
-        diff_algorithm=d.get("diff_algorithm", ""),
+        diff_algorithm=d.get("diff_algorithm", "dsphere") or "dsphere",
         picard_order=d.get("picard_order", 1),
         initial_time=d.get("initial_time", 0.0),
         disable_intrad=d.get("disable_intrad", False),

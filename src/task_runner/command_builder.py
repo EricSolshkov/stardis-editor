@@ -164,7 +164,7 @@ class CommandBuilder:
     @staticmethod
     def _build_advanced_args(adv: AdvancedOptions) -> List[str]:
         args = []
-        if adv.diff_algorithm:
+        if adv.diff_algorithm and adv.diff_algorithm != "dsphere":
             args.extend(['-a', adv.diff_algorithm])
         if adv.picard_order > 1:
             args.extend(['-o', str(adv.picard_order)])

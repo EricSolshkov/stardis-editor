@@ -30,6 +30,13 @@ class SurfacePainter:
         self.renderer = renderer
         self.body_actor = body_actor
 
+        # Cell picker (ray-cast, restricted to this body only)
+        self._cell_picker = vtk.vtkCellPicker()
+        self._cell_picker.SetTolerance(0.005)
+        self._cell_picker.InitializePickList()
+        self._cell_picker.AddPickList(body_actor)
+        self._cell_picker.SetPickFromList(True)
+
         # 确保 BoundaryLabel 数组存在
         self.labels = body_polydata.GetCellData().GetArray("BoundaryLabel")
         if self.labels is None:
@@ -254,52 +261,21 @@ class SurfacePainter:
     # ─── 内部: 硬件拾取 ─────────────────────────────────────────
 
     def _pick_cells_in_brush(self, sx: int, sy: int) -> List[int]:
-        """使用 vtkHardwareSelector 拾取画刷圆内的 cell。"""
-        r = self.brush_radius_px
-        selector = vtk.vtkHardwareSelector()
-        selector.SetRenderer(self.renderer)
-        selector.SetArea(sx - r, sy - r, sx + r, sy + r)
-        selector.SetFieldAssociation(vtk.vtkDataObject.FIELD_ASSOCIATION_CELLS)
-
-        result = selector.Select()
-        if result is None:
+        """使用 vtkCellPicker 射线拾取距离镜头最近的可见 cell。"""
+        self._cell_picker.Pick(sx, sy, 0, self.renderer)
+        if self._cell_picker.GetActor() is not self.body_actor:
             return []
-
-        cell_ids = []
-        for node_idx in range(result.GetNumberOfNodes()):
-            node = result.GetNode(node_idx)
-            if node is None:
-                continue
-            prop = node.GetProperties().Get(vtk.vtkSelectionNode.PROP())
-            if prop is not None and prop != self.body_actor:
-                continue
-            sel_ids = node.GetSelectionList()
-            if sel_ids is None:
-                continue
-            for i in range(sel_ids.GetNumberOfTuples()):
-                cell_ids.append(sel_ids.GetValue(i))
-        return cell_ids
+        cell_id = self._cell_picker.GetCellId()
+        if cell_id < 0:
+            return []
+        return [cell_id]
 
     def _pick_single_cell(self, screen_x: int, screen_y: int) -> int:
-        """用 1×1 像素区域拾取单个 cell，返回 cell_id；无命中返回 -1。"""
-        selector = vtk.vtkHardwareSelector()
-        selector.SetRenderer(self.renderer)
-        selector.SetArea(screen_x, screen_y, screen_x, screen_y)
-        selector.SetFieldAssociation(vtk.vtkDataObject.FIELD_ASSOCIATION_CELLS)
-        result = selector.Select()
-        if result is None:
+        """用 vtkCellPicker 射线拾取单个最近可见 cell，返回 cell_id；无命中返回 -1。"""
+        self._cell_picker.Pick(screen_x, screen_y, 0, self.renderer)
+        if self._cell_picker.GetActor() is not self.body_actor:
             return -1
-        for node_idx in range(result.GetNumberOfNodes()):
-            node = result.GetNode(node_idx)
-            if node is None:
-                continue
-            prop = node.GetProperties().Get(vtk.vtkSelectionNode.PROP())
-            if prop is not None and prop != self.body_actor:
-                continue
-            sel_ids = node.GetSelectionList()
-            if sel_ids and sel_ids.GetNumberOfTuples() > 0:
-                return sel_ids.GetValue(0)
-        return -1
+        return self._cell_picker.GetCellId()
 
 
 # ─── zone_id 直接寻址 LUT ───────────────────────────────────────

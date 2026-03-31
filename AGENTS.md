@@ -63,6 +63,7 @@
 |------|------|
 | `scene_model.py` | 几何中心化数据模型，定义 `SceneModel`、`Body`、`SurfaceZone`、`Probe`、`IRCamera`，以及边界条件数据类（`TemperatureBC`、`ConvectionBC`、`FluxBC`、`CombinedBC`） |
 | `task_model.py` | 任务执行数据模型，定义 `Task`、`TaskQueue`、`StardisParams`、`HtppParams`、枚举（`TaskType`、`ComputeMode`、`HtppMode`、`ErrorAction`）及 JSON 序列化/反序列化 |
+| `material_database.py` | 物理材质数据库，定义 `Material`（dataclass）和 `MaterialDatabase`（QObject），内置 25 种材质（金属/绝缘体/流体/其他），支持 CRUD、JSON 持久化、导入/导出 |
 | `editor_preferences.py` | 编辑器偏好设置 `EditorPreferences`（dataclass），管理搜索目录、最近 exe/工作目录/工程文件、启动行为、exe 标签映射，支持从 v1 `user_settings.json` 迁移 |
 
 ### src/parsers/ — 场景文件解析器
@@ -76,8 +77,9 @@
 
 | 文件 | 功能 |
 |------|------|
-| `scene_tree_panel.py` | `SceneTreePanel(QTreeWidget)`：场景层级树，按边界类型着色显示，支持任务分组节点和右键快捷创建任务 |
-| `property_panel.py` | `PropertyPanel`：动态属性编辑器（QStackedWidget），包含 `GlobalSettingsEditor`、`BodyEditor`、`SurfaceZoneEditor`、`TaskQueueEditor`、`TaskEditor` 等子编辑器 |
+| `scene_tree_panel.py` | `SceneTreePanel(QTreeWidget)`：场景层级树，按边界类型着色显示，支持任务分组节点和右键快捷创建任务，Body 右键支持应用材质/保存材质 |
+| `property_panel.py` | `PropertyPanel`：动态属性编辑器（QStackedWidget），包含 `GlobalSettingsEditor`、`BodyEditor`（含材质选择器）、`SurfaceZoneEditor`、`TaskQueueEditor`、`TaskEditor` 等子编辑器 |
+| `material_manager_dialog.py` | `MaterialManagerDialog(QDialog)`：材质库 CRUD 管理对话框（分类筛选/表格浏览/详情编辑/导入导出），`SaveMaterialDialog`：从 Body 快速保存材质 |
 | `task_editors.py` | 任务编辑器面板，`TaskQueueEditor`（错误策略/队列环境变量/运行按钮）和 `TaskEditor`（Stardis/HTPP 参数配置、命令预览） |
 | `preferences_dialog.py` | `PreferencesDialog(QDialog)`：编辑器偏好设置对话框，3 个标签页（常规/可执行文件标签/最近工程） |
 
@@ -104,6 +106,7 @@
 - **命令模式**：SurfacePainter 使用命令栈实现撤销/重做
 - **关键字驱动格式**：场景 `.txt` 文件使用 SOLID / FLUID / T_BOUNDARY 等关键字，人类可读
 - **偏好设置持久化**：`EditorPreferences` 管理编辑器级别设置（搜索目录、最近工程、启动行为、exe_tags 标签化可执行文件管理），JSON 序列化到 `editor_settings.json`，首次启动自动从 v1 `user_settings.json` 迁移，设计文档：`design/editor_preferences/`
+- **物理材质数据库**：`MaterialDatabase` 管理可复用的物理材质参数（λ/ρ/cp），采用值拷贝语义——选择材质时将参数复制到 Body 的 `MaterialRef`，手动修改参数自动解除材质关联。内置 25 种常用材质，用户可新增/编辑/删除/导入/导出。JSON 持久化到 `material_database.json`，设计文档：`design/material_database/`
 
 ### 3. Task Runner（任务执行系统）
 在 Scene Editor v2 中集成计算任务配置与执行，取代 v1 独立控制面板的手动工作流。支持：
@@ -210,6 +213,7 @@ tests/
 | 测试分层 | 对象 | 策略 |
 |----------|------|------|
 | 数据模型 (`models/`) | `SceneModel`、`Body`、边界条件 dataclass | 纯 Python 单元测试，无需 VTK/Qt |
+| 材质数据库 (`models/`) | `Material`、`MaterialDatabase` CRUD/持久化/信号 | 需 `QApplication`，JSON 临时文件 |
 | 解析器 (`parsers/`) | `SceneParser`、`SceneWriter`、`triangle_hash_matcher` | 临时文件 + fixtures，往返一致性 |
 | 画笔系统 (`viewport/`) | `SurfacePainter` 标注与撤销/重做 | 构造 VTK PolyData，验证标注结果 |
 | UI 面板 (`panels/`) | `SceneTreePanel`、`PropertyPanel` | 需 `QApplication`，验证信号/槽 |

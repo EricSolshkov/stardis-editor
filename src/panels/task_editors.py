@@ -22,6 +22,7 @@ from models.task_model import (
     StardisParams, HtppParams, AdvancedOptions, FieldSolveConfig,
 )
 from models.scene_model import SceneModel
+from task_runner.variable_expander import list_available_variables
 
 
 # ─── HTPP 常量（与 v1 HtppControlPanel 对齐）──────────────────
@@ -78,6 +79,126 @@ def _ispin(value=0, lo=0, hi=999999999):
     s.setRange(lo, hi)
     s.setValue(value)
     return s
+
+
+# ═══════════════════════════════════════════════════════════════
+# 变量模板输入框
+# ═══════════════════════════════════════════════════════════════
+
+class VariableLineEdit(QLineEdit):
+    """支持 {VAR} 变量自动补全的输入框。
+
+    当用户输入 '{' 时弹出变量列表，支持过滤、方向键导航、
+    Enter/点击插入。
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._variables: list = []  # [(name, description), ...]
+        self._popup = QListWidget()
+        self._popup.setWindowFlags(Qt.ToolTip)
+        self._popup.setMaximumHeight(200)
+        self._popup.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self._popup.itemClicked.connect(self._insert_selected)
+        self.textChanged.connect(self._on_text_changed)
+
+    def set_available_variables(self, variables):
+        """设置可用变量列表。variables: [(name, description), ...]"""
+        self._variables = list(variables)
+
+    def _on_text_changed(self, text):
+        cursor_pos = self.cursorPosition()
+
+        # 查找光标前最近的未关闭 '{'
+        prefix_text = text[:cursor_pos]
+        brace_pos = prefix_text.rfind('{')
+        if brace_pos < 0:
+            self._popup.hide()
+            return
+
+        # 检查 '{' 和光标之间是否有 '}'（已关闭则不弹出）
+        between = prefix_text[brace_pos + 1:]
+        if '}' in between:
+            self._popup.hide()
+            return
+
+        # 检查是否是转义 '{{' 
+        if brace_pos > 0 and prefix_text[brace_pos - 1] == '{':
+            self._popup.hide()
+            return
+
+        # 提取过滤前缀（'{' 后面已输入的字符）
+        filter_text = between.upper()
+
+        self._popup.clear()
+        for name, desc in self._variables:
+            if filter_text and filter_text not in name.upper():
+                continue
+            item = QListWidgetItem(f"{{{name}}}  —  {desc}")
+            item.setData(Qt.UserRole, name)
+            self._popup.addItem(item)
+
+        if self._popup.count() == 0:
+            self._popup.hide()
+            return
+
+        self._popup.setCurrentRow(0)
+
+        # 定位弹窗
+        rect = self.rect()
+        global_pos = self.mapToGlobal(rect.bottomLeft())
+        self._popup.move(global_pos)
+        self._popup.setFixedWidth(max(rect.width(), 300))
+        self._popup.show()
+
+    def _insert_selected(self, item=None):
+        if item is None:
+            item = self._popup.currentItem()
+        if item is None:
+            return
+
+        var_name = item.data(Qt.UserRole)
+        text = self.text()
+        cursor_pos = self.cursorPosition()
+
+        # 找到光标前的 '{' 位置
+        prefix_text = text[:cursor_pos]
+        brace_pos = prefix_text.rfind('{')
+        if brace_pos < 0:
+            return
+
+        # 替换 '{...' 为 '{VAR_NAME}'
+        new_text = text[:brace_pos] + '{' + var_name + '}' + text[cursor_pos:]
+        self.setText(new_text)
+        self.setCursorPosition(brace_pos + len(var_name) + 2)
+        self._popup.hide()
+
+    def keyPressEvent(self, event):
+        if self._popup.isVisible():
+            if event.key() == Qt.Key_Down:
+                row = self._popup.currentRow()
+                if row < self._popup.count() - 1:
+                    self._popup.setCurrentRow(row + 1)
+                return
+            elif event.key() == Qt.Key_Up:
+                row = self._popup.currentRow()
+                if row > 0:
+                    self._popup.setCurrentRow(row - 1)
+                return
+            elif event.key() in (Qt.Key_Return, Qt.Key_Enter):
+                self._insert_selected()
+                return
+            elif event.key() == Qt.Key_Escape:
+                self._popup.hide()
+                return
+
+        super().keyPressEvent(event)
+
+    def focusOutEvent(self, event):
+        # 延迟隐藏以允许点击 popup 项
+        from PyQt5.QtCore import QTimer
+        QTimer.singleShot(200, self._popup.hide)
+        super().focusOutEvent(event)
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -346,6 +467,12 @@ class TaskEditor(QWidget):
         self._verbosity = _ispin(1, 0, 5)
         stardis_form.addRow("详细度 (-V):", self._verbosity)
 
+        # 传导步算法 (-a)
+        self._diff_algo = QComboBox()
+        self._diff_algo.addItems(["dsphere", "wos"])
+        self._diff_algo.setToolTip("传导步算法 (-a):\nδ-Sphere (dsphere) — 默认\nWalk on Spheres (wos)")
+        stardis_form.addRow("传导算法 (-a):", self._diff_algo)
+
         # 相机引用 (IR_RENDER)
         self._camera_ref_label = QLabel("相机引用:")
         self._camera_ref = QComboBox()
@@ -383,11 +510,11 @@ class TaskEditor(QWidget):
         self._field_time_chk.toggled.connect(self._on_field_time_toggled)
 
         # 输出重定向
-        self._output_redirect = QLineEdit()
-        self._output_redirect.setPlaceholderText("stdout 重定向文件名（相对工作目录）")
+        self._output_redirect = VariableLineEdit()
+        self._output_redirect.setPlaceholderText("stdout 重定向文件名（支持 {变量}）")
         stardis_form.addRow("stdout 输出文件:", self._output_redirect)
-        self._stderr_redirect = QLineEdit()
-        self._stderr_redirect.setPlaceholderText("stderr 重定向文件名（相对工作目录）")
+        self._stderr_redirect = VariableLineEdit()
+        self._stderr_redirect.setPlaceholderText("stderr 重定向文件名（支持 {变量}）")
         stardis_form.addRow("stderr 输出文件:", self._stderr_redirect)
 
         layout.addWidget(self._stardis_grp)
@@ -415,8 +542,8 @@ class TaskEditor(QWidget):
         htpp_form.addRow("", self._force_overwrite)
         self._htpp_verbose = QCheckBox("详细 (-v)")
         htpp_form.addRow("", self._htpp_verbose)
-        self._htpp_output = QLineEdit()
-        self._htpp_output.setPlaceholderText("输出文件名 (-o)")
+        self._htpp_output = VariableLineEdit()
+        self._htpp_output.setPlaceholderText("输出文件名 (-o, 支持 {变量})")
         htpp_form.addRow("输出文件:", self._htpp_output)
 
         # IMAGE 模式
@@ -501,6 +628,7 @@ class TaskEditor(QWidget):
         self._model_file.textChanged.connect(self.property_changed.emit)
         for w in (self._samples, self._threads, self._verbosity):
             w.valueChanged.connect(self.property_changed.emit)
+        self._diff_algo.currentIndexChanged.connect(self.property_changed.emit)
         self._camera_ref.currentIndexChanged.connect(self.property_changed.emit)
         self._probe_list.itemChanged.connect(self.property_changed.emit)
         self._field_type.currentIndexChanged.connect(self.property_changed.emit)
@@ -528,6 +656,9 @@ class TaskEditor(QWidget):
         self._range_min.valueChanged.connect(self.property_changed.emit)
         self._range_max.valueChanged.connect(self.property_changed.emit)
         self._gnuplot.toggled.connect(self.property_changed.emit)
+
+        # 连接命令预览更新
+        self.property_changed.connect(self._update_preview)
 
     def set_model(self, model: SceneModel):
         self._model = model
@@ -600,6 +731,7 @@ class TaskEditor(QWidget):
             self._load_htpp(task, model)
 
         self.blockSignals(False)
+        self._update_preview()
 
     def _load_stardis(self, task: Task, model: SceneModel):
         sp = task.stardis_params or StardisParams()
@@ -619,6 +751,16 @@ class TaskEditor(QWidget):
         self._verbosity.setValue(sp.verbosity)
         self._output_redirect.setText(task.output_redirect or "")
         self._stderr_redirect.setText(task.stderr_redirect or "")
+
+        # 设置变量自动补全
+        avail_vars = list_available_variables(TaskType.STARDIS, mode)
+        self._output_redirect.set_available_variables(avail_vars)
+        self._stderr_redirect.set_available_variables(avail_vars)
+
+        # 高级选项
+        algo = sp.advanced.diff_algorithm or "dsphere"
+        idx = self._diff_algo.findText(algo)
+        self._diff_algo.setCurrentIndex(idx if idx >= 0 else 0)
 
         # 按模式显示/隐藏子控件
         is_ir = mode == ComputeMode.IR_RENDER
@@ -711,6 +853,10 @@ class TaskEditor(QWidget):
         self._htpp_verbose.setChecked(hp.verbose)
         self._htpp_output.setText(hp.output_file)
 
+        # 设置变量自动补全
+        avail_vars = list_available_variables(TaskType.HTPP, htpp_mode=mode)
+        self._htpp_output.set_available_variables(avail_vars)
+
         # IMAGE 模式控件
         is_image = mode == HtppMode.IMAGE
         is_map = mode == HtppMode.MAP
@@ -762,6 +908,7 @@ class TaskEditor(QWidget):
         sp.samples = self._samples.value()
         sp.threads = self._threads.value()
         sp.verbosity = self._verbosity.value()
+        sp.advanced.diff_algorithm = self._diff_algo.currentText()
         task.output_redirect = self._output_redirect.text() or None
         task.stderr_redirect = self._stderr_redirect.text() or None
 
@@ -871,3 +1018,48 @@ class TaskEditor(QWidget):
 
     def clear_log(self):
         self._log_output.clear()
+
+    def _update_preview(self):
+        """根据当前编辑器状态更新命令预览。"""
+        try:
+            from task_runner.command_builder import CommandBuilder as _CB
+
+            # 查找当前任务
+            task = None
+            for t in self._model.task_queue.tasks:
+                if t.id == self._task_id:
+                    task = t
+                    break
+            if task is None:
+                self._cmd_preview.setPlainText("")
+                return
+
+            # 从编辑器读回当前值到临时副本
+            import copy
+            tmp = copy.deepcopy(task)
+            self.apply_to(tmp)
+
+            # 构建简化 preview
+            parts = [tmp.exe_ref or "<exe>"]
+
+            if tmp.task_type == TaskType.STARDIS and tmp.stardis_params:
+                sp = tmp.stardis_params
+                args = _CB.build_stardis(
+                    sp.model_file, tmp.compute_mode, sp)
+                parts.extend(args)
+            elif tmp.task_type == TaskType.HTPP and tmp.htpp_params:
+                args = _CB.build_htpp(
+                    tmp.htpp_mode, tmp.htpp_params, "<input>")
+                parts.extend(args)
+
+            cmd = ' '.join(parts)
+
+            # 显示输出重定向（模板原样显示）
+            if tmp.output_redirect:
+                cmd += f" > {tmp.output_redirect}"
+            if tmp.stderr_redirect:
+                cmd += f" 2> {tmp.stderr_redirect}"
+
+            self._cmd_preview.setPlainText(cmd)
+        except Exception:
+            self._cmd_preview.setPlainText("")

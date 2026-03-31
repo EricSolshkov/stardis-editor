@@ -140,11 +140,12 @@ class SceneViewport(QWidget):
 
         self.renderer.ResetCamera()
         self._init_orbit_from_camera()
-        # 确保所有物体以实体模式渲染
+        # 确保所有物体以实体模式渲染 + 线框叠加
         for actor in self._body_actors.values():
             actor.GetProperty().SetOpacity(1.0)
             actor.ForceOpaqueOn()
             actor.ForceTranslucentOff()
+        self._add_all_wireframe_overlays()
         # 同步光源
         self.sync_lights(model.lights)
         self._ambient_intensity = model.ambient_intensity
@@ -152,27 +153,37 @@ class SceneViewport(QWidget):
         self._render()
 
     def highlight_body(self, body_name: str):
-        """选中指定几何体: 轮廓线高亮 (Silhouette)。"""
+        """选中指定几何体: 轮廓线高亮 (Silhouette) + 启用该几何体的区域着色。"""
         self._selected_body = body_name
         self._selected_probe = ""
         self._restore_zone_lut()
-        for actor in self._body_actors.values():
+        for name, actor in self._body_actors.items():
             actor.GetProperty().SetOpacity(1.0)
             actor.ForceOpaqueOn()
             actor.ForceTranslucentOff()
+            # 仅选中几何体启用区域着色
+            if name == body_name:
+                actor.GetMapper().ScalarVisibilityOn()
+            else:
+                actor.GetMapper().ScalarVisibilityOff()
         if self._mode == MODE_NAVIGATE:
             self._add_silhouette(body_name)
         self._render()
 
     def highlight_zone(self, body_name: str, zone_name: str):
-        """高亮表面区域: 轮廓线 + 区域 cell 着色高亮。"""
+        """高亮表面区域: 轮廓线 + 仅启用该几何体区域着色 + 选中区域突出。"""
         self._selected_body = body_name
         self._selected_probe = ""
         self._restore_zone_lut()
-        for actor in self._body_actors.values():
+        for name, actor in self._body_actors.items():
             actor.GetProperty().SetOpacity(1.0)
             actor.ForceOpaqueOn()
             actor.ForceTranslucentOff()
+            # 仅选中几何体启用区域着色
+            if name == body_name:
+                actor.GetMapper().ScalarVisibilityOn()
+            else:
+                actor.GetMapper().ScalarVisibilityOff()
         if self._mode == MODE_NAVIGATE:
             self._add_silhouette(body_name)
             self._apply_zone_lut_highlight(body_name, zone_name)
@@ -188,6 +199,7 @@ class SceneViewport(QWidget):
             actor.GetProperty().SetOpacity(1.0)
             actor.ForceOpaqueOn()
             actor.ForceTranslucentOff()
+            actor.GetMapper().ScalarVisibilityOff()
         for name, (marker, label) in self._probe_actors.items():
             if name == probe_name:
                 marker.GetProperty().SetColor(1, 0.5, 0)
@@ -198,7 +210,7 @@ class SceneViewport(QWidget):
         self._render()
 
     def clear_highlight(self):
-        """恢复所有对象正常渲染。"""
+        """恢复所有对象正常渲染，关闭区域着色，恢复线框。"""
         self._selected_body = ""
         self._selected_probe = ""
         self._remove_silhouette()
@@ -207,6 +219,8 @@ class SceneViewport(QWidget):
             actor.GetProperty().SetOpacity(1.0)
             actor.ForceOpaqueOn()
             actor.ForceTranslucentOff()
+            actor.GetMapper().ScalarVisibilityOff()
+        self._add_all_wireframe_overlays()
         self._render()
 
     # ─── 涂选模式 ────────────────────────────────────────────────
@@ -226,17 +240,20 @@ class SceneViewport(QWidget):
         self._painter = SurfacePainter(poly, self.renderer, actor)
         self._painter.save_undo_point()
 
-        # 聚焦物体: 实体 + 线框叠加; 其余半透明
+        # 聚焦物体: 实体 + 线框叠加 + 区域着色; 其余半透明 + 无线框 + 无区域着色
+        self._remove_all_wireframe_overlays()
         for name, act in self._body_actors.items():
             if name == body_name:
                 act.GetProperty().SetOpacity(1.0)
                 act.ForceOpaqueOn()
                 act.ForceTranslucentOff()
+                act.GetMapper().ScalarVisibilityOn()
                 self._add_wireframe_overlay(name)
             else:
                 act.GetProperty().SetOpacity(0.15)
                 act.ForceOpaqueOff()
                 act.ForceTranslucentOn()
+                act.GetMapper().ScalarVisibilityOff()
 
         # 更新工具栏下拉
         self._update_paint_toolbar(body_name)
@@ -638,6 +655,9 @@ class SceneViewport(QWidget):
 
         actor = vtk.vtkActor()
         actor.SetMapper(mapper)
+        # 默认不显示区域着色，使用统一灰色
+        mapper.ScalarVisibilityOff()
+        actor.GetProperty().SetColor(0.7, 0.7, 0.7)
 
         self.renderer.AddActor(actor)
         self._body_actors[body.name] = actor
@@ -1005,6 +1025,11 @@ class SceneViewport(QWidget):
         wire_actor.GetProperty().SetLineWidth(1.0)
         self.renderer.AddActor(wire_actor)
         self._wireframe_actors[body_name] = wire_actor
+
+    def _add_all_wireframe_overlays(self):
+        """为所有几何体添加线框叠加。"""
+        for name in self._body_polydatas:
+            self._add_wireframe_overlay(name)
 
     def _remove_all_wireframe_overlays(self):
         """移除所有线框叠加 Actor。"""

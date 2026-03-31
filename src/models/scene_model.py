@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from typing import List, Optional, Tuple, Set, Union
 import json
 import os
+import copy
 
 from models.task_model import TaskQueue, task_queue_to_dict, dict_to_task_queue
 
@@ -28,6 +29,13 @@ class Side(Enum):
     FRONT = "FRONT"
     BACK = "BACK"
     BOTH = "BOTH"
+
+
+class NormalOrientation(Enum):
+    """法线朝向语义标注。"""
+    UNKNOWN = "unknown"   # 未确认（开放网格或未检测）
+    OUTWARD = "outward"   # 法线指向外侧
+    INWARD  = "inward"    # 法线指向内侧
 
 
 class BoundaryType(Enum):
@@ -56,6 +64,7 @@ class MaterialRef:
     conductivity: float = 1.0    # λ (W/m/K) — SOLID only
     density: float = 1.0         # ρ (kg/m³)
     specific_heat: float = 1.0   # cp (J/kg/K)
+    source_material: str = ""    # 来源材质名称（空串 = 手动输入）
 
 
 # ─── 体积属性 ───────────────────────────────────────────────────
@@ -69,6 +78,11 @@ class VolumeProperties:
     imposed_temp: Optional[float] = None # None → UNKNOWN
     volumetric_power: float = 0.0        # SOLID only
     side: Side = Side.FRONT
+
+
+def clone_volume(vol: VolumeProperties) -> VolumeProperties:
+    """深拷贝 VolumeProperties，避免前后侧共享同一对象。"""
+    return copy.deepcopy(vol)
 
 
 # ─── 边界条件变体 ────────────────────────────────────────────────
@@ -158,15 +172,96 @@ class SurfaceZone:
 class Body:
     name: str = ""
     stl_files: List[str] = field(default_factory=list)
+    # 兼容层: 旧代码仍可能通过 body.volume 读写
     volume: VolumeProperties = field(default_factory=VolumeProperties)
+    # 新模型: 始终用 FRONT/BACK 表达底层介质
+    front_volume: Optional[VolumeProperties] = None
+    back_volume: Optional[VolumeProperties] = None
+    front_enabled: bool = False
+    back_enabled: bool = False
+    sync_front_back: bool = False
     next_zone_id: int = 1                   # 区域 ID 分配计数器（单调递增，删除后不重用）
     surface_zones: List[SurfaceZone] = field(default_factory=list)
+    normal_orientation: NormalOrientation = NormalOrientation.UNKNOWN  # 法线朝向语义标注
+
+    def __post_init__(self):
+        # 从 legacy volume 初始化 front/back（首次构建时）
+        if self.front_volume is None and self.back_volume is None:
+            legacy = clone_volume(self.volume)
+            if legacy.side == Side.BOTH:
+                self.front_volume = clone_volume(legacy)
+                self.back_volume = clone_volume(legacy)
+                self.front_enabled = True
+                self.back_enabled = True
+                self.sync_front_back = True
+            elif legacy.side == Side.BACK:
+                self.front_volume = clone_volume(legacy)
+                self.back_volume = clone_volume(legacy)
+                self.front_enabled = False
+                self.back_enabled = True
+                self.sync_front_back = False
+            else:
+                self.front_volume = clone_volume(legacy)
+                self.back_volume = clone_volume(legacy)
+                self.front_enabled = True
+                self.back_enabled = False
+                self.sync_front_back = False
+        else:
+            if self.front_volume is None and self.back_volume is not None:
+                self.front_volume = clone_volume(self.back_volume)
+            if self.back_volume is None and self.front_volume is not None:
+                self.back_volume = clone_volume(self.front_volume)
+
+            if not self.front_enabled and not self.back_enabled:
+                # 默认启用 FRONT 侧
+                self.front_enabled = True
+
+        self._refresh_legacy_volume_view()
 
     def allocate_zone_id(self) -> int:
         """分配下一个 zone_id 并递增计数器。"""
         zid = self.next_zone_id
         self.next_zone_id += 1
         return zid
+
+    def effective_side(self) -> Side:
+        if self.front_enabled and self.back_enabled:
+            return Side.BOTH
+        if self.back_enabled:
+            return Side.BACK
+        return Side.FRONT
+
+    def set_side_volume(self, side: Side, vol: VolumeProperties):
+        """写入指定侧参数并更新启用状态。"""
+        if side == Side.BOTH:
+            self.front_volume = clone_volume(vol)
+            self.back_volume = clone_volume(vol)
+            self.front_enabled = True
+            self.back_enabled = True
+            self.sync_front_back = True
+        elif side == Side.FRONT:
+            self.front_volume = clone_volume(vol)
+            self.front_enabled = True
+            self.sync_front_back = False
+        else:
+            self.back_volume = clone_volume(vol)
+            self.back_enabled = True
+            self.sync_front_back = False
+        self._refresh_legacy_volume_view()
+
+    def get_side_volume(self, side: Side) -> VolumeProperties:
+        if side == Side.BACK:
+            return self.back_volume
+        return self.front_volume
+
+    def _refresh_legacy_volume_view(self):
+        """更新 body.volume 兼容视图，供旧逻辑读取。"""
+        side = self.effective_side()
+        base = self.back_volume if side == Side.BACK else self.front_volume
+        if base is None:
+            base = VolumeProperties()
+        self.volume = clone_volume(base)
+        self.volume.side = side
 
 
 # ─── 全局设置 ───────────────────────────────────────────────────
@@ -376,6 +471,35 @@ class SceneModel:
         if self.task_queue.tasks:
             data["task_queue"] = task_queue_to_dict(self.task_queue)
 
+        # body_materials — 材质来源标记（兼容旧格式: body_name -> str）
+        body_materials = {}
+        for body in self.bodies:
+            front_src = (body.front_volume.material.source_material
+                         if body.front_enabled and body.front_volume else "")
+            back_src = (body.back_volume.material.source_material
+                        if body.back_enabled and body.back_volume else "")
+            if not front_src and not back_src:
+                continue
+            if front_src == back_src or not back_src:
+                # 两侧相同 或 仅 front 有材质 → 简写为字符串
+                body_materials[body.name] = front_src
+            elif not front_src:
+                # 仅 back 有材质 → 仍需 dict 以区分侧
+                body_materials[body.name] = {"front": "", "back": back_src}
+            else:
+                body_materials[body.name] = {
+                    "front": front_src,
+                    "back": back_src,
+                }
+        if body_materials:
+            data["body_materials"] = body_materials
+
+        # normal_orientations — 法线朝向语义标注
+        data["normal_orientations"] = {
+            body.name: body.normal_orientation.value
+            for body in self.bodies
+        }
+
         with open(path, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2, ensure_ascii=False)
 
@@ -398,6 +522,33 @@ class SceneModel:
         else:
             self.task_queue = TaskQueue()
 
+        # 恢复 body_materials — 材质来源标记（兼容旧格式）
+        body_materials = data.get("body_materials", {})
+        for body in self.bodies:
+            src = body_materials.get(body.name, "")
+            if isinstance(src, str):
+                if src:
+                    if body.front_volume:
+                        body.front_volume.material.source_material = src
+                    if body.back_volume:
+                        body.back_volume.material.source_material = src
+            elif isinstance(src, dict):
+                if body.front_volume:
+                    body.front_volume.material.source_material = src.get("front", "")
+                if body.back_volume:
+                    body.back_volume.material.source_material = src.get("back", "")
+
+            body._refresh_legacy_volume_view()
+
+        # 恢复 normal_orientations — 法线朝向语义标注
+        orientations = data.get("normal_orientations", {})
+        for body in self.bodies:
+            val = orientations.get(body.name, "unknown")
+            try:
+                body.normal_orientation = NormalOrientation(val)
+            except ValueError:
+                body.normal_orientation = NormalOrientation.UNKNOWN
+
         # 恢复 zone_id / next_zone_id（cell_ids 不在 JSON 中，由三角形哈希匹配恢复）
         body_zone_ids = data.get("body_zone_ids", {})
         for body in self.bodies:
@@ -408,6 +559,97 @@ class SceneModel:
                     zone = self.get_zone(body.name, zd.get("name", ""))
                     if zone:
                         zone.zone_id = zd.get("zone_id", zone.zone_id)
+
+
+# ─── 法线朝向检测 ────────────────────────────────────────────────
+
+def detect_normal_orientation(stl_path: str) -> NormalOrientation:
+    """
+    检测 STL 网格的法线朝向。
+
+    对封闭网格使用有符号体积法（散度定理）:
+      V_signed = (1/6) Σ v0 · (v1 × v2)
+      V > 0 → 法线朝外 (OUTWARD)
+      V < 0 → 法线朝内 (INWARD)
+
+    开放网格返回 UNKNOWN。
+    """
+    try:
+        import vtk
+    except ImportError:
+        return NormalOrientation.UNKNOWN
+
+    if not os.path.isfile(stl_path):
+        return NormalOrientation.UNKNOWN
+
+    reader = vtk.vtkSTLReader()
+    reader.SetFileName(stl_path)
+    reader.Update()
+    poly = reader.GetOutput()
+
+    if poly is None or poly.GetNumberOfCells() == 0:
+        return NormalOrientation.UNKNOWN
+
+    return detect_normal_orientation_from_polydata(poly)
+
+
+def detect_normal_orientation_from_polydata(poly) -> NormalOrientation:
+    """
+    从 vtkPolyData 检测法线朝向。
+
+    封闭网格 → OUTWARD / INWARD；开放网格 → UNKNOWN。
+    """
+    try:
+        import vtk
+    except ImportError:
+        return NormalOrientation.UNKNOWN
+
+    if poly is None or poly.GetNumberOfCells() == 0:
+        return NormalOrientation.UNKNOWN
+
+    # 合并重复顶点，确保拓扑正确（STL 常见重复顶点）
+    clean = vtk.vtkCleanPolyData()
+    clean.SetInputData(poly)
+    clean.Update()
+    cleaned = clean.GetOutput()
+
+    # 检查是否封闭
+    feature_edges = vtk.vtkFeatureEdges()
+    feature_edges.BoundaryEdgesOn()
+    feature_edges.NonManifoldEdgesOn()
+    feature_edges.FeatureEdgesOff()
+    feature_edges.ManifoldEdgesOff()
+    feature_edges.SetInputData(cleaned)
+    feature_edges.Update()
+
+    if feature_edges.GetOutput().GetNumberOfCells() > 0:
+        return NormalOrientation.UNKNOWN  # 开放网格
+
+    # 计算有符号体积
+    signed_volume = 0.0
+    for i in range(poly.GetNumberOfCells()):
+        cell = poly.GetCell(i)
+        if cell.GetNumberOfPoints() != 3:
+            continue
+        p0 = poly.GetPoint(cell.GetPointId(0))
+        p1 = poly.GetPoint(cell.GetPointId(1))
+        p2 = poly.GetPoint(cell.GetPointId(2))
+        # v0 · (v1 × v2)
+        cross = (
+            p1[1] * p2[2] - p1[2] * p2[1],
+            p1[2] * p2[0] - p1[0] * p2[2],
+            p1[0] * p2[1] - p1[1] * p2[0],
+        )
+        signed_volume += p0[0] * cross[0] + p0[1] * cross[1] + p0[2] * cross[2]
+
+    signed_volume /= 6.0
+
+    if signed_volume > 0:
+        return NormalOrientation.OUTWARD
+    elif signed_volume < 0:
+        return NormalOrientation.INWARD
+    else:
+        return NormalOrientation.UNKNOWN
 
 
 # ─── 序列化辅助 ─────────────────────────────────────────────────

@@ -8,7 +8,7 @@ from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QFormLayout, QLabel,
     QDoubleSpinBox, QSpinBox, QComboBox, QLineEdit, QGroupBox,
     QStackedWidget, QScrollArea, QPushButton, QTableWidget,
-    QTableWidgetItem, QHeaderView, QAbstractItemView,
+    QTableWidgetItem, QHeaderView, QAbstractItemView, QCheckBox,
 )
 from PyQt5.QtCore import pyqtSignal, Qt
 import sys, os
@@ -18,10 +18,12 @@ from models.scene_model import (
     SurfaceZone, TemperatureBC, ConvectionBC, FluxBC, CombinedBC,
     SolidFluidConnection, SolidSolidConnection,
     Probe, IRCamera,
-    BodyType, Side, BoundaryType, ProbeType,
+    BodyType, Side, BoundaryType, ProbeType, NormalOrientation,
     BOUNDARY_TYPE_LABELS,
     SceneLight, LightType,
+    clone_volume,
 )
+from models.material_database import MaterialDatabase, Material
 from panels.task_editors import TaskQueueEditor, TaskEditor
 
 
@@ -82,28 +84,44 @@ class GlobalSettingsEditor(QWidget):
         gs.scale = self.scale.value()
 
 
-class BodyEditor(QWidget):
+_CUSTOM_VALUE_TEXT = "(自定义值)"
+
+
+class CavityGroupBox(QGroupBox):
+    """单侧腔体材质/体积属性编辑器 — 勾选时展开、取消时折叠。"""
     property_changed = pyqtSignal()
-    request_paint_mode = pyqtSignal(str)
+    request_open_material_manager = pyqtSignal()
 
-    def __init__(self):
-        super().__init__()
-        layout = QVBoxLayout(self)
+    def __init__(self, title: str):
+        super().__init__(title)
+        self.setCheckable(True)
+        self.setChecked(False)
+        self._material_db: MaterialDatabase = None
+        self._updating_material = False
 
-        # 体积属性组
-        vol_grp = QGroupBox("体积属性")
-        vol_form = QFormLayout(vol_grp)
+        self._content = QWidget()
+        form = QFormLayout(self._content)
+        form.setContentsMargins(4, 0, 4, 4)
 
         self.type_combo = QComboBox()
         self.type_combo.addItems(["SOLID", "FLUID"])
-        vol_form.addRow("类型:", self.type_combo)
+        form.addRow("类型:", self.type_combo)
+
+        mat_row = QHBoxLayout()
+        self.material_combo = QComboBox()
+        self.material_combo.setMinimumWidth(160)
+        mat_row.addWidget(self.material_combo, 1)
+        self.manage_mat_btn = QPushButton("管理...")
+        self.manage_mat_btn.setFixedWidth(60)
+        mat_row.addWidget(self.manage_mat_btn)
+        form.addRow("材质:", mat_row)
 
         self.lam = _spin(1, 0, 1e6, 4, "W/m/K")
         self.rho = _spin(1, 0, 1e9, 2, "kg/m³")
         self.cp = _spin(1, 0, 1e9, 2, "J/kg/K")
-        vol_form.addRow("导热系数 λ:", self.lam)
-        vol_form.addRow("密度 ρ:", self.rho)
-        vol_form.addRow("比热容 cp:", self.cp)
+        form.addRow("导热系数 λ:", self.lam)
+        form.addRow("密度 ρ:", self.rho)
+        form.addRow("比热容 cp:", self.cp)
 
         self.delta_combo = QComboBox()
         self.delta_combo.addItems(["AUTO", "自定义"])
@@ -111,10 +129,10 @@ class BodyEditor(QWidget):
         dh = QHBoxLayout()
         dh.addWidget(self.delta_combo)
         dh.addWidget(self.delta_spin)
-        vol_form.addRow("随机行走步长 δ:", dh)
+        form.addRow("随机行走步长 δ:", dh)
 
         self.t_init = _spin(300, 0, 1e6, 1, "K")
-        vol_form.addRow("初始温度:", self.t_init)
+        form.addRow("初始温度:", self.t_init)
 
         self.imposed_combo = QComboBox()
         self.imposed_combo.addItems(["UNKNOWN", "自定义"])
@@ -122,18 +140,184 @@ class BodyEditor(QWidget):
         ih = QHBoxLayout()
         ih.addWidget(self.imposed_combo)
         ih.addWidget(self.imposed_spin)
-        vol_form.addRow("施加温度:", ih)
+        form.addRow("施加温度:", ih)
 
         self.power = _spin(0, 0, 1e12, 2, "W/m³")
-        vol_form.addRow("体积热源:", self.power)
+        form.addRow("体积热源:", self.power)
 
-        self.side_combo = QComboBox()
-        self.side_combo.addItems(["FRONT", "BACK", "BOTH"])
-        vol_form.addRow("法线朝向:", self.side_combo)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.addWidget(self._content)
+        self._content.setVisible(False)
 
-        layout.addWidget(vol_grp)
+        # 信号
+        self.toggled.connect(self._on_toggled)
+        self.manage_mat_btn.clicked.connect(self.request_open_material_manager.emit)
+        self.material_combo.currentIndexChanged.connect(self._on_material_combo_changed)
+        for w in (self.lam, self.rho, self.cp, self.delta_spin,
+                  self.t_init, self.imposed_spin, self.power):
+            w.valueChanged.connect(self._on_spinbox_changed)
+        for w in (self.type_combo, self.delta_combo, self.imposed_combo):
+            w.currentIndexChanged.connect(self.property_changed.emit)
 
-        # 几何信息
+    def _on_toggled(self, checked: bool):
+        self._content.setVisible(checked)
+        self.property_changed.emit()
+
+    # ── 材质数据库 ──
+
+    def set_material_database(self, db: MaterialDatabase):
+        self._material_db = db
+        self._rebuild_material_combo()
+        db.material_added.connect(lambda _: self._rebuild_material_combo())
+        db.material_removed.connect(lambda _: self._rebuild_material_combo())
+        db.material_updated.connect(lambda _: self._rebuild_material_combo())
+
+    def _rebuild_material_combo(self):
+        if not self._material_db:
+            return
+        old_block = self.material_combo.blockSignals(True)
+        current_data = self.material_combo.currentData()
+        self.material_combo.clear()
+        self.material_combo.addItem(_CUSTOM_VALUE_TEXT, "")
+        for cat in self._material_db.categories():
+            self.material_combo.insertSeparator(self.material_combo.count())
+            for mat in self._material_db.list_by_category(cat):
+                prefix = "● " if mat.is_builtin else "○ "
+                self.material_combo.addItem(f"{prefix}{mat.name}", mat.name)
+        if current_data:
+            idx = self.material_combo.findData(current_data)
+            if idx >= 0:
+                self.material_combo.setCurrentIndex(idx)
+        self.material_combo.blockSignals(old_block)
+
+    def _on_material_combo_changed(self, index):
+        if self._updating_material or not self._material_db:
+            return
+        mat_name = self.material_combo.currentData()
+        if not mat_name:
+            self.property_changed.emit()
+            return
+        mat = self._material_db.get(mat_name)
+        if not mat:
+            return
+        self._updating_material = True
+        self.lam.setValue(mat.conductivity)
+        self.rho.setValue(mat.density)
+        self.cp.setValue(mat.specific_heat)
+        self._updating_material = False
+        self.property_changed.emit()
+
+    def _on_spinbox_changed(self):
+        if self._updating_material:
+            return
+        mat_name = self.material_combo.currentData()
+        if mat_name and self._material_db:
+            mat = self._material_db.get(mat_name)
+            if mat and (self.lam.value() != mat.conductivity or
+                        self.rho.value() != mat.density or
+                        self.cp.value() != mat.specific_heat):
+                old_block = self.material_combo.blockSignals(True)
+                self.material_combo.setCurrentIndex(0)
+                self.material_combo.blockSignals(old_block)
+        self.property_changed.emit()
+
+    def load_volume(self, vol: VolumeProperties, source_material: str = ""):
+        """将 VolumeProperties 加载到控件。"""
+        self._updating_material = True
+        self.type_combo.setCurrentText(vol.body_type.value)
+        m = vol.material
+        self.lam.setValue(m.conductivity)
+        self.rho.setValue(m.density)
+        self.cp.setValue(m.specific_heat)
+        old_block = self.material_combo.blockSignals(True)
+        self._select_material(source_material, m)
+        self.material_combo.blockSignals(old_block)
+        if vol.delta is None:
+            self.delta_combo.setCurrentIndex(0)
+            self.delta_spin.setEnabled(False)
+        else:
+            self.delta_combo.setCurrentIndex(1)
+            self.delta_spin.setEnabled(True)
+            self.delta_spin.setValue(vol.delta)
+        self.t_init.setValue(vol.initial_temp)
+        if vol.imposed_temp is None:
+            self.imposed_combo.setCurrentIndex(0)
+            self.imposed_spin.setEnabled(False)
+        else:
+            self.imposed_combo.setCurrentIndex(1)
+            self.imposed_spin.setEnabled(True)
+            self.imposed_spin.setValue(vol.imposed_temp)
+        self.power.setValue(vol.volumetric_power)
+        self._updating_material = False
+
+    def apply_to_volume(self, vol: VolumeProperties):
+        """将控件值写回 VolumeProperties。"""
+        vol.body_type = BodyType(self.type_combo.currentText())
+        vol.material.conductivity = self.lam.value()
+        vol.material.density = self.rho.value()
+        vol.material.specific_heat = self.cp.value()
+        vol.material.source_material = self.material_combo.currentData() or ""
+        vol.delta = (None if self.delta_combo.currentIndex() == 0
+                     else self.delta_spin.value())
+        vol.initial_temp = self.t_init.value()
+        vol.imposed_temp = (None if self.imposed_combo.currentIndex() == 0
+                            else self.imposed_spin.value())
+        vol.volumetric_power = self.power.value()
+
+    def _select_material(self, source_material: str, m: MaterialRef):
+        if not self._material_db or not source_material:
+            self.material_combo.setCurrentIndex(0)
+            return
+        mat = self._material_db.get(source_material)
+        if not mat:
+            self.material_combo.setCurrentIndex(0)
+            return
+        if (mat.conductivity == m.conductivity and
+                mat.density == m.density and
+                mat.specific_heat == m.specific_heat):
+            idx = self.material_combo.findData(source_material)
+            if idx >= 0:
+                self.material_combo.setCurrentIndex(idx)
+                return
+        self.material_combo.setCurrentIndex(0)
+
+
+class BodyEditor(QWidget):
+    """几何体属性编辑器 — 法线朝向 + 内外侧腔体材质 + 几何信息 + 表面区域。"""
+    property_changed = pyqtSignal()
+    request_paint_mode = pyqtSignal(str)
+    request_open_material_manager = pyqtSignal()
+
+    def __init__(self):
+        super().__init__()
+        layout = QVBoxLayout(self)
+
+        # ── 法线朝向 ──
+        normal_grp = QGroupBox("法线朝向")
+        normal_form = QFormLayout(normal_grp)
+        self._normal_status_label = QLabel("未检测")
+        normal_form.addRow("检测结果:", self._normal_status_label)
+        self._normal_override_check = QCheckBox("手动覆盖")
+        self._normal_manual_combo = QComboBox()
+        self._normal_manual_combo.addItems(["指向外侧", "指向内侧"])
+        self._normal_manual_combo.setEnabled(False)
+        override_row = QHBoxLayout()
+        override_row.addWidget(self._normal_override_check)
+        override_row.addWidget(self._normal_manual_combo)
+        normal_form.addRow("", override_row)
+        layout.addWidget(normal_grp)
+
+        # ── 内侧腔体 / 外侧腔体 ──
+        self.inner_cavity = CavityGroupBox("内侧腔体")
+        layout.addWidget(self.inner_cavity)
+        self.outer_cavity = CavityGroupBox("外侧腔体")
+        layout.addWidget(self.outer_cavity)
+
+        self._current_orientation = NormalOrientation.UNKNOWN
+        self._auto_orientation = NormalOrientation.UNKNOWN
+
+        # ── 几何信息 ──
         geo_grp = QGroupBox("几何信息")
         geo_form = QFormLayout(geo_grp)
         self.stl_label = QLabel("-")
@@ -142,82 +326,262 @@ class BodyEditor(QWidget):
         geo_form.addRow("", self.geo_info)
         layout.addWidget(geo_grp)
 
-        # 表面区域概览
+        # ── 表面区域概览 ──
         zone_grp = QGroupBox("表面区域概览")
-        zone_layout = QVBoxLayout(zone_grp)
+        zone_lay = QVBoxLayout(zone_grp)
         self.zone_table = QTableWidget(0, 3)
         self.zone_table.setHorizontalHeaderLabels(["区域", "类型", "三角面"])
         self.zone_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         self.zone_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.zone_table.setSelectionBehavior(QAbstractItemView.SelectRows)
-        zone_layout.addWidget(self.zone_table)
-
+        zone_lay.addWidget(self.zone_table)
         self.paint_btn = QPushButton("🎨 编辑表面区域")
-        zone_layout.addWidget(self.paint_btn)
+        zone_lay.addWidget(self.paint_btn)
         layout.addWidget(zone_grp)
 
         layout.addStretch()
 
         self._body_name = ""
+        self._material_db = None
+        self._last_modified = self.inner_cavity  # BOTH 时从此读取
+
+        # ── 信号 ──
         self.paint_btn.clicked.connect(lambda: self.request_paint_mode.emit(self._body_name))
-        for w in (self.lam, self.rho, self.cp, self.delta_spin, self.t_init, self.imposed_spin, self.power):
-            w.valueChanged.connect(self.property_changed.emit)
-        for w in (self.type_combo, self.delta_combo, self.imposed_combo, self.side_combo):
-            w.currentIndexChanged.connect(self.property_changed.emit)
+        self.inner_cavity.request_open_material_manager.connect(
+            self.request_open_material_manager.emit)
+        self.outer_cavity.request_open_material_manager.connect(
+            self.request_open_material_manager.emit)
+        self.inner_cavity.property_changed.connect(self._on_inner_changed)
+        self.outer_cavity.property_changed.connect(self._on_outer_changed)
+        self._normal_override_check.toggled.connect(self._on_normal_override_toggled)
+        self._normal_manual_combo.currentIndexChanged.connect(self._on_normal_manual_changed)
+
+    # ── 材质数据库 ──
+
+    def set_material_database(self, db: MaterialDatabase):
+        self._material_db = db
+        self.inner_cavity.set_material_database(db)
+        self.outer_cavity.set_material_database(db)
 
     def load(self, body: Body):
         self.blockSignals(True)
         self._body_name = body.name
-        v = body.volume
-        m = v.material
+        orientation = body.normal_orientation
+        self._current_orientation = orientation
+        self._auto_orientation = orientation
 
-        self.type_combo.setCurrentText(v.body_type.value)
-        self.lam.setValue(m.conductivity)
-        self.rho.setValue(m.density)
-        self.cp.setValue(m.specific_heat)
-        if v.delta is None:
-            self.delta_combo.setCurrentIndex(0)
-            self.delta_spin.setEnabled(False)
-        else:
-            self.delta_combo.setCurrentIndex(1)
-            self.delta_spin.setEnabled(True)
-            self.delta_spin.setValue(v.delta)
-        self.t_init.setValue(v.initial_temp)
-        if v.imposed_temp is None:
-            self.imposed_combo.setCurrentIndex(0)
-            self.imposed_spin.setEnabled(False)
-        else:
-            self.imposed_combo.setCurrentIndex(1)
-            self.imposed_spin.setEnabled(True)
-            self.imposed_spin.setValue(v.imposed_temp)
-        self.power.setValue(v.volumetric_power)
-        self.side_combo.setCurrentText(v.side.value)
+        self._normal_override_check.setChecked(False)
+        self._update_normal_ui(orientation)
+
+        # 基于 FRONT/BACK 启用状态映射到内/外腔体
+        front_on = body.front_enabled
+        back_on = body.back_enabled
+        inner_on, outer_on = self._front_back_to_cavities(front_on, back_on, orientation)
+        self.inner_cavity.blockSignals(True)
+        self.outer_cavity.blockSignals(True)
+
+        inner_vol = body.front_volume if self._inner_to_side(orientation) == Side.FRONT else body.back_volume
+        outer_vol = body.front_volume if self._outer_to_side(orientation) == Side.FRONT else body.back_volume
+        if inner_vol is None:
+            inner_vol = body.volume
+        if outer_vol is None:
+            outer_vol = body.volume
+
+        self.inner_cavity.load_volume(inner_vol, inner_vol.material.source_material)
+        self.outer_cavity.load_volume(outer_vol, outer_vol.material.source_material)
+        self.inner_cavity.setChecked(inner_on)
+        self.outer_cavity.setChecked(outer_on)
+        self._last_modified = self.inner_cavity
+        self.inner_cavity.blockSignals(False)
+        self.outer_cavity.blockSignals(False)
 
         stl = body.stl_files[0] if body.stl_files else "-"
         self.stl_label.setText(os.path.basename(stl))
 
-        # 表面区域表格
         self.zone_table.setRowCount(len(body.surface_zones))
         for r, zone in enumerate(body.surface_zones):
             self.zone_table.setItem(r, 0, QTableWidgetItem(zone.name))
             self.zone_table.setItem(r, 1, QTableWidgetItem(
                 BOUNDARY_TYPE_LABELS.get(zone.boundary_type, "?")))
-            ncells = len(zone.source.cell_ids) if hasattr(zone.source, 'cell_ids') else "N/A"
+            ncells = (len(zone.source.cell_ids)
+                      if hasattr(zone.source, 'cell_ids') else "N/A")
             self.zone_table.setItem(r, 2, QTableWidgetItem(str(ncells)))
 
         self.blockSignals(False)
 
     def apply_to(self, body: Body):
-        v = body.volume
-        v.body_type = BodyType(self.type_combo.currentText())
-        v.material.conductivity = self.lam.value()
-        v.material.density = self.rho.value()
-        v.material.specific_heat = self.cp.value()
-        v.delta = None if self.delta_combo.currentIndex() == 0 else self.delta_spin.value()
-        v.initial_temp = self.t_init.value()
-        v.imposed_temp = None if self.imposed_combo.currentIndex() == 0 else self.imposed_spin.value()
-        v.volumetric_power = self.power.value()
-        v.side = Side(self.side_combo.currentText())
+        inner_on = self.inner_cavity.isChecked()
+        outer_on = self.outer_cavity.isChecked()
+        orientation = self._current_orientation
+        front_on, back_on = self._cavities_to_front_back(inner_on, outer_on, orientation)
+
+        if inner_on and outer_on:
+            # BOTH: 两侧保持一致，写入一侧后镜像到另一侧
+            shared = body.front_volume if self._last_modified is self.inner_cavity else body.back_volume
+            if shared is None:
+                shared = body.volume
+            self._last_modified.apply_to_volume(shared)
+            body.front_volume = clone_volume(shared)
+            body.back_volume = clone_volume(shared)
+            body.front_enabled = True
+            body.back_enabled = True
+            body.sync_front_back = True
+        elif inner_on:
+            side = self._inner_to_side(orientation)
+            target = body.front_volume if side == Side.FRONT else body.back_volume
+            if target is None:
+                target = body.volume
+            self.inner_cavity.apply_to_volume(target)
+            if side == Side.FRONT:
+                body.front_volume = clone_volume(target)
+            else:
+                body.back_volume = clone_volume(target)
+            body.front_enabled = front_on
+            body.back_enabled = back_on
+            body.sync_front_back = False
+        elif outer_on:
+            side = self._outer_to_side(orientation)
+            target = body.front_volume if side == Side.FRONT else body.back_volume
+            if target is None:
+                target = body.volume
+            self.outer_cavity.apply_to_volume(target)
+            if side == Side.FRONT:
+                body.front_volume = clone_volume(target)
+            else:
+                body.back_volume = clone_volume(target)
+            body.front_enabled = front_on
+            body.back_enabled = back_on
+            body.sync_front_back = False
+
+        if not inner_on and not outer_on:
+            body.front_enabled = False
+            body.back_enabled = False
+            body.sync_front_back = False
+
+        body._refresh_legacy_volume_view()
+        body.normal_orientation = self._current_orientation
+
+    def _on_inner_changed(self):
+        self._last_modified = self.inner_cavity
+        self.property_changed.emit()
+
+    def _on_outer_changed(self):
+        self._last_modified = self.outer_cavity
+        self.property_changed.emit()
+
+    # ── 腔体 ↔ Side 映射 ──
+
+    @staticmethod
+    def _side_to_cavities(side: Side, orientation: NormalOrientation) -> tuple:
+        """Side + 朝向 → (inner_on, outer_on)。
+
+        Stardis 定义: FRONT = 反法线侧, BACK = 法线侧。
+        """
+        if side == Side.BOTH:
+            return True, True
+        # FRONT = 反法线侧: 法线朝外时 FRONT 指向内侧, 法线朝内时 FRONT 指向外侧
+        front_is_inner = (orientation != NormalOrientation.INWARD)
+        if side == Side.FRONT:
+            return (True, False) if front_is_inner else (False, True)
+        return (False, True) if front_is_inner else (True, False)
+
+    @staticmethod
+    def _front_back_to_cavities(front_on: bool, back_on: bool, orientation: NormalOrientation) -> tuple:
+        """FRONT/BACK 侧启用状态 → (inner_on, outer_on)。"""
+        front_is_inner = (orientation != NormalOrientation.INWARD)
+        if front_is_inner:
+            return front_on, back_on
+        return back_on, front_on
+
+    @staticmethod
+    def _cavities_to_front_back(inner_on: bool, outer_on: bool, orientation: NormalOrientation) -> tuple:
+        """(inner_on, outer_on) → FRONT/BACK 侧启用状态。"""
+        front_is_inner = (orientation != NormalOrientation.INWARD)
+        if front_is_inner:
+            return inner_on, outer_on
+        return outer_on, inner_on
+
+    @staticmethod
+    def _inner_to_side(orientation: NormalOrientation) -> Side:
+        """内侧腔体 → Side (FRONT=反法线侧)。"""
+        # 法线朝外: 内侧=反法线=FRONT; 法线朝内: 内侧=法线侧=BACK
+        return Side.BACK if orientation == NormalOrientation.INWARD else Side.FRONT
+
+    @staticmethod
+    def _outer_to_side(orientation: NormalOrientation) -> Side:
+        """外侧腔体 → Side (FRONT=反法线侧)。"""
+        # 法线朝外: 外侧=法线侧=BACK; 法线朝内: 外侧=反法线=FRONT
+        return Side.FRONT if orientation == NormalOrientation.INWARD else Side.BACK
+
+    # ── 旧接口兼容（测试依赖） ──
+
+    @staticmethod
+    def _semantic_to_side(text: str, orientation: NormalOrientation) -> Side:
+        """将 UI 选项文本映射回 Side 枚举 (FRONT=反法线侧)。"""
+        if orientation == NormalOrientation.OUTWARD:
+            # 法线朝外: FRONT=反法线=内侧, BACK=法线=外侧
+            return {"外侧": Side.BACK, "内侧": Side.FRONT,
+                    "两侧": Side.BOTH}.get(text, Side.FRONT)
+        elif orientation == NormalOrientation.INWARD:
+            # 法线朝内: FRONT=反法线=外侧, BACK=法线=内侧
+            return {"外侧": Side.FRONT, "内侧": Side.BACK,
+                    "两侧": Side.BOTH}.get(text, Side.FRONT)
+        return {"FRONT": Side.FRONT, "BACK": Side.BACK,
+                "BOTH": Side.BOTH}.get(text, Side.FRONT)
+
+    @staticmethod
+    def _side_to_semantic(side: Side, orientation: NormalOrientation) -> str:
+        """将 Side 枚举映射为 UI 显示文本 (FRONT=反法线侧)。"""
+        if orientation == NormalOrientation.OUTWARD:
+            # FRONT=反法线=内侧, BACK=法线=外侧
+            return {Side.FRONT: "内侧", Side.BACK: "外侧",
+                    Side.BOTH: "两侧"}[side]
+        elif orientation == NormalOrientation.INWARD:
+            # FRONT=反法线=外侧, BACK=法线=内侧
+            return {Side.FRONT: "外侧", Side.BACK: "内侧",
+                    Side.BOTH: "两侧"}[side]
+        return side.value
+
+    # ── 法线 UI ──
+
+    def _update_normal_ui(self, orientation: NormalOrientation):
+        """更新法线状态标签和腔体标题。"""
+        if orientation == NormalOrientation.UNKNOWN:
+            self._normal_status_label.setText("⚠ 未检测（开放网格或未加载）")
+            self.inner_cavity.setTitle("FRONT 侧腔体（反法线侧）")
+            self.outer_cavity.setTitle("BACK 侧腔体（法线侧）")
+        else:
+            arrow = "→ 外侧" if orientation == NormalOrientation.OUTWARD else "→ 内侧"
+            self._normal_status_label.setText(f"✅ 法线{arrow}（自动检测）")
+            self.inner_cavity.setTitle("内侧腔体")
+            self.outer_cavity.setTitle("外侧腔体")
+        is_overridden = self._normal_override_check.isChecked()
+        self._normal_manual_combo.setEnabled(is_overridden)
+        if orientation == NormalOrientation.OUTWARD:
+            self._normal_manual_combo.setCurrentText("指向外侧")
+        elif orientation == NormalOrientation.INWARD:
+            self._normal_manual_combo.setCurrentText("指向内侧")
+
+    def _on_normal_override_toggled(self, checked: bool):
+        """手动覆盖复选框状态变化。"""
+        self._normal_manual_combo.setEnabled(checked)
+        if checked:
+            self._on_normal_manual_changed()
+        else:
+            self._current_orientation = self._auto_orientation
+            self._update_normal_ui(self._auto_orientation)
+            self.property_changed.emit()
+
+    def _on_normal_manual_changed(self):
+        """手动法线下拉框变化 → 更新腔体标题。"""
+        if not self._normal_override_check.isChecked():
+            return
+        text = self._normal_manual_combo.currentText()
+        new_orient = (NormalOrientation.OUTWARD if text == "指向外侧"
+                      else NormalOrientation.INWARD)
+        self._current_orientation = new_orient
+        self._update_normal_ui(new_orient)
+        self.property_changed.emit()
 
 
 class SurfaceZoneEditor(QWidget):

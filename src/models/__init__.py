@@ -6,6 +6,7 @@ from .scene_model import (
     Probe, IRCamera,
     BodyType, Side, BoundaryType, ProbeType,
 )
+from .material_database import Material, MaterialDatabase, is_valid_material_name
 from .task_model import (
     TaskType, ComputeMode, FieldSolveType, HtppMode,
     ErrorAction, ErrorPolicy,

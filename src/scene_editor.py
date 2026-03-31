@@ -12,7 +12,7 @@ from PyQt5.QtWidgets import (
     QMainWindow, QSplitter, QFileDialog, QMenuBar, QAction,
     QMessageBox, QApplication, QWidget, QVBoxLayout,
     QDialog, QFormLayout, QComboBox, QDialogButtonBox, QLabel,
-    QPlainTextEdit,
+    QPlainTextEdit, QToolBar,
 )
 from PyQt5.QtCore import Qt
 
@@ -23,7 +23,9 @@ from models.scene_model import (
     SceneModel, Body, VolumeProperties, MaterialRef, SurfaceZone,
     Probe, ProbeType, BodyType, Side, ImportedSTL, PaintedRegion, IRCamera,
     SceneLight, LightType,
+    detect_normal_orientation,
 )
+from models.material_database import MaterialDatabase, Material
 from models.task_model import (
     Task, TaskType, ComputeMode, HtppMode,
     StardisParams, HtppParams,
@@ -32,6 +34,7 @@ from models.task_model import (
 )
 from panels.scene_tree_panel import SceneTreePanel
 from panels.property_panel import PropertyPanel
+from panels.material_manager_dialog import MaterialManagerDialog, SaveMaterialDialog
 from viewport.scene_viewport import SceneViewport
 from parsers.scene_parser import SceneParser
 from parsers.scene_writer import SceneWriter
@@ -61,11 +64,18 @@ class SceneEditor(QMainWindow):
         legacy_path = os.path.join(self._project_root, 'user_settings.json')
         self._prefs = EditorPreferences.load_or_migrate(self._prefs_path, legacy_path)
 
+        # 材质数据库
+        self._material_db_path = os.path.join(self._project_root, 'material_database.json')
+        self._material_db = MaterialDatabase.create_default(self)
+        self._material_db.load(self._material_db_path)
+
         self._build_ui()
         self._build_menus()
         self._connect_signals()
         self._validator.validation_finished.connect(self._on_validation_finished)
         self._props.task_editor.set_preferences(self._prefs)
+        self._props.body_editor.set_material_database(self._material_db)
+        self._tree.set_material_database(self._material_db)
         self._refresh_all()
         self._apply_startup_behavior()
 
@@ -148,6 +158,13 @@ class SceneEditor(QMainWindow):
         self._validate_act.triggered.connect(self._on_validate)
         scene_menu.addAction(self._validate_act)
 
+        # 工具栏
+        toolbar = self.addToolBar("工具")
+        mat_act = QAction("材质库管理", self)
+        mat_act.setShortcut("Ctrl+M")
+        mat_act.triggered.connect(self._open_material_manager)
+        toolbar.addAction(mat_act)
+
     # ─── 信号连接 ────────────────────────────────────────────────
 
     def _connect_signals(self):
@@ -226,6 +243,11 @@ class SceneEditor(QMainWindow):
 
         # 属性面板
         props.request_paint_mode.connect(self._on_enter_paint)
+        props.body_editor.request_open_material_manager.connect(self._open_material_manager)
+
+        # 场景树材质操作
+        tree.request_apply_material.connect(self._on_apply_material_to_body)
+        tree.request_save_material.connect(self._on_save_material_from_body)
 
         # 属性面板值变化 → 写回模型
         props.global_editor.property_changed.connect(lambda: self._apply_and_refresh_tree())
@@ -341,11 +363,45 @@ class SceneEditor(QMainWindow):
             self._props.task_editor.set_preferences(self._prefs)
 
     def closeEvent(self, event):
-        """关闭时保存当前工程路径到偏好设置。"""
+        """关闭时保存当前工程路径到偏好设置和材质库。"""
         if self._scene_file:
             self._prefs.last_project_path = self._scene_file
         self._save_prefs()
+        self._material_db.save(self._material_db_path)
         super().closeEvent(event)
+
+    # ─── 材质库 ──────────────────────────────────────────────────
+
+    def _open_material_manager(self):
+        dlg = MaterialManagerDialog(self._material_db, self)
+        dlg.exec_()
+        self._material_db.save(self._material_db_path)
+
+    def _on_apply_material_to_body(self, body_name: str, mat_name: str):
+        """右键菜单 → 应用材质到 Body。"""
+        body = self._model.get_body_by_name(body_name)
+        mat = self._material_db.get(mat_name)
+        if not body or not mat:
+            return
+        body.volume.material.conductivity = mat.conductivity
+        body.volume.material.density = mat.density
+        body.volume.material.specific_heat = mat.specific_heat
+        body.volume.material.source_material = mat_name
+        self._refresh_all()
+
+    def _on_save_material_from_body(self, body_name: str):
+        """右键菜单 → 保存当前材质到库 / 打开管理器。"""
+        if not body_name:
+            self._open_material_manager()
+            return
+        body = self._model.get_body_by_name(body_name)
+        if not body:
+            return
+        m = body.volume.material
+        dlg = SaveMaterialDialog(m.conductivity, m.density, m.specific_heat,
+                                  self._material_db, self)
+        if dlg.exec_() == QDialog.Accepted:
+            self._material_db.save(self._material_db_path)
 
     # ─── 边界归属解析 ────────────────────────────────────────────
 
@@ -541,6 +597,7 @@ class SceneEditor(QMainWindow):
                     material=MaterialRef(conductivity=1.0, density=1.0, specific_heat=1.0),
                     side=Side.FRONT,
                 ),
+                normal_orientation=detect_normal_orientation(path),
             )
             self._model.bodies.append(body)
 

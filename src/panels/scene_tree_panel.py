@@ -4,7 +4,7 @@ S2: 场景树面板
 以几何体为中心的只读树形显示，支持选择信号发射。
 """
 
-from PyQt5.QtWidgets import QTreeWidget, QTreeWidgetItem, QMenu, QAction, QAbstractItemView
+from PyQt5.QtWidgets import QTreeWidget, QTreeWidgetItem, QMenu, QAction, QAbstractItemView, QInputDialog
 from PyQt5.QtCore import pyqtSignal, Qt, QUrl
 from PyQt5.QtGui import QIcon, QColor, QBrush, QDesktopServices
 import sys, os
@@ -99,6 +99,10 @@ class SceneTreePanel(QTreeWidget):
     request_clear_tasks = pyqtSignal()                # 清空任务队列
     request_create_render_tasks = pyqtSignal(str)     # Camera名 → 创建渲染任务组
     request_create_probe_task   = pyqtSignal(str)     # Probe名 → 创建探针任务
+    request_apply_material      = pyqtSignal(str, str) # body_name, material_name
+    request_save_material       = pyqtSignal(str)      # body_name → 保存当前材质到库
+    request_rename_body         = pyqtSignal(str, str)  # old_name, new_name
+    request_rename_zone         = pyqtSignal(str, str, str)  # body_name, old_zone_name, new_zone_name
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -110,6 +114,10 @@ class SceneTreePanel(QTreeWidget):
         self.itemDoubleClicked.connect(self._on_item_double_clicked)
         self._model: SceneModel = SceneModel()
         self._scene_file: str = ""
+        self._material_db = None  # MaterialDatabase（可选）
+
+    def set_material_database(self, db):
+        self._material_db = db
 
     def set_scene_file(self, path: str):
         self._scene_file = path
@@ -315,8 +323,25 @@ class SceneTreePanel(QTreeWidget):
             act = menu.addAction("添加几何体...")
             act.triggered.connect(lambda: self.request_add_body.emit())
         elif ntype == NODE_BODY:
+            act_rename = menu.addAction("重命名")
+            act_rename.triggered.connect(lambda: self._rename_body(nname))
             act_paint = menu.addAction("涂选编辑")
             act_paint.triggered.connect(lambda: self.request_paint_mode.emit(nname))
+            menu.addSeparator()
+            # 材质应用子菜单
+            if self._material_db:
+                mat_menu = menu.addMenu("应用材质")
+                for mat in self._material_db.list_all():
+                    prefix = "● " if mat.is_builtin else "○ "
+                    act_mat = mat_menu.addAction(f"{prefix}{mat.name}")
+                    act_mat.triggered.connect(
+                        lambda checked, bn=nname, mn=mat.name: self.request_apply_material.emit(bn, mn))
+                mat_menu.addSeparator()
+                act_browse = mat_menu.addAction("浏览材质库...")
+                act_browse.triggered.connect(
+                    lambda: self.request_save_material.emit(""))  # 空串表示打开管理器
+            act_save_mat = menu.addAction("保存当前材质到库...")
+            act_save_mat.triggered.connect(lambda: self.request_save_material.emit(nname))
             menu.addSeparator()
             act_del = menu.addAction("删除")
             act_del.triggered.connect(lambda: self.request_delete_body.emit(nname))
@@ -329,6 +354,11 @@ class SceneTreePanel(QTreeWidget):
             menu.addSeparator()
             act_task = menu.addAction("创建探针计算任务…")
             act_task.triggered.connect(lambda: self.request_create_probe_task.emit(nname))
+        elif ntype == NODE_ZONE:
+            body_name = item.data(0, ROLE_BODY_NAME)
+            act_rename = menu.addAction("重命名")
+            act_rename.triggered.connect(lambda: self._rename_zone(body_name, nname))
+            menu.addSeparator()
         elif ntype == NODE_CONN:
             act = menu.addAction("删除")
             act.triggered.connect(lambda: self.request_delete_conn.emit(nname))
@@ -418,6 +448,18 @@ class SceneTreePanel(QTreeWidget):
                     and item.data(0, ROLE_BODY_NAME) == body_name):
                 return item
         return None
+
+    def _rename_body(self, old_name: str):
+        new_name, ok = QInputDialog.getText(self, "重命名几何体", "新名称:", text=old_name)
+        new_name = new_name.strip()
+        if ok and new_name and new_name != old_name:
+            self.request_rename_body.emit(old_name, new_name)
+
+    def _rename_zone(self, body_name: str, old_name: str):
+        new_name, ok = QInputDialog.getText(self, "重命名区域", "新名称:", text=old_name)
+        new_name = new_name.strip()
+        if ok and new_name and new_name != old_name:
+            self.request_rename_zone.emit(body_name, old_name, new_name)
 
     def _iter_all_items(self):
         stack = [self.topLevelItem(i) for i in range(self.topLevelItemCount())]

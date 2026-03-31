@@ -20,6 +20,10 @@ from models.task_model import (
 from models.scene_model import SceneModel
 from models.editor_preferences import EditorPreferences
 from task_runner.command_builder import CommandBuilder
+from task_runner.variable_expander import (
+    build_variable_registry, inject_input_variable,
+    expand_variables, VariableError,
+)
 
 
 class ValidationError(Exception):
@@ -119,10 +123,9 @@ def resolve_all(queue: TaskQueue, model: SceneModel,
         stderr_file = None
         input_file = None
         args = []
-
-        # 通用: stderr 重定向
-        if task.stderr_redirect:
-            stderr_file = os.path.join(working_dir, task.stderr_redirect)
+        task_index = queue.tasks.index(task) + 1  # 1-based
+        camera_snapshot = None
+        probe_snapshots = None
 
         if task.task_type == TaskType.STARDIS:
             if not task.stardis_params:
@@ -131,9 +134,6 @@ def resolve_all(queue: TaskQueue, model: SceneModel,
             model_file = sp.model_file
             if not model_file:
                 raise ValidationError(f"任务 '{task.name}' 未指定模型文件 (-M)")
-
-            camera_snapshot = None
-            probe_snapshots = None
 
             if task.compute_mode == ComputeMode.IR_RENDER:
                 if not sp.camera_ref:
@@ -155,9 +155,6 @@ def resolve_all(queue: TaskQueue, model: SceneModel,
                 camera_snapshot=camera_snapshot,
                 probe_snapshots=probe_snapshots,
             )
-
-            if task.output_redirect:
-                output_file = os.path.join(working_dir, task.output_redirect)
 
         elif task.task_type == TaskType.HTPP:
             if not task.htpp_params:
@@ -181,11 +178,36 @@ def resolve_all(queue: TaskQueue, model: SceneModel,
             if not task.htpp_params.output_file and input_file:
                 base = os.path.splitext(os.path.basename(input_file))[0]
                 task.htpp_params.output_file = f"{base}.ppm"
-            if task.htpp_params.output_file:
-                task.htpp_params.output_file = os.path.abspath(
-                    os.path.join(working_dir, task.htpp_params.output_file)
-                )
 
+        # 4. 变量模板展开
+        var_registry = build_variable_registry(
+            task, task_index,
+            resolved_camera=camera_snapshot,
+            resolved_probes=probe_snapshots,
+            merged_env=merged_env,
+        )
+        inject_input_variable(var_registry, input_file)
+
+        try:
+            if task.output_redirect:
+                expanded = expand_variables(task.output_redirect, var_registry)
+                output_file = os.path.join(working_dir, expanded)
+            if task.stderr_redirect:
+                expanded = expand_variables(task.stderr_redirect, var_registry)
+                stderr_file = os.path.join(working_dir, expanded)
+            if (task.task_type == TaskType.HTPP and task.htpp_params
+                    and task.htpp_params.output_file):
+                expanded = expand_variables(task.htpp_params.output_file, var_registry)
+                task.htpp_params.output_file = os.path.abspath(
+                    os.path.join(working_dir, expanded)
+                )
+        except VariableError as e:
+            raise ValidationError(
+                f"任务 '{task.name}' 变量展开失败: {e}"
+            ) from e
+
+        # 5. HTPP 命令行构建（在变量展开之后，使用已展开的绝对路径）
+        if task.task_type == TaskType.HTPP:
             args = CommandBuilder.build_htpp(
                 task.htpp_mode, task.htpp_params, input_file,
             )

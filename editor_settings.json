@@ -1,9 +1,13 @@
 {
   "search_dirs": [
-    "D:/Works/Projects/Stardis-GPU/stardis-cpu/build",
-    "D:/Works/Projects/Stardis-GPU/stardis-cus3d/build"
+    "D:/Stardis-GPU/stardis-cpu",
+    "D:/Stardis-GPU/stardis-oxs3d/build",
+    "D:/Stardis-GPU/stardis-oxs3d-merge-phase/build/bin"
   ],
   "recent_exes": [
+    "D:/Stardis-GPU/stardis-oxs3d-merge-phase/build/bin\\Release\\stardis.exe",
+    "D:/Stardis-GPU/stardis-oxs3d/build\\bin\\Release\\stardis.exe",
+    "D:/Stardis-GPU/stardis-cpu\\build\\bin\\Release\\stardis.exe",
     "D:/Works/Projects/Stardis-GPU\\stardis-cus3d-ref-oxs3d\\build\\bin\\Release\\stardis.exe",
     "D:/Works/Projects/Stardis-GPU\\stardis-cus3d-ref-oxs3d\\build\\bin\\Debug\\stardis.exe",
     "D:/Works/Projects/Stardis-GPU\\stardis-cus3d-ref-cus3d\\build\\bin\\Release\\stardis.exe",
@@ -24,17 +28,26 @@
     "D:/Works/Projects/Stardis-GPU/Stardis-Starter-Pack/porous"
   ],
   "recent_projects": [
+    "D:/Stardis-GPU/Stardis-Starter-Pack/city\\model.txt",
+    "D:/Stardis-GPU/Stardis-Starter-Pack/city/model.txt",
+    "D:/Stardis-GPU/Stardis-Starter-Pack/testporous/porous.txt",
+    "D:/Stardis-GPU/Stardis-Starter-Pack/testporous\\porous.txt",
+    "D:/Stardis-GPU/Stardis-Starter-Pack/cbox\\cbox.txt",
+    "D:/Stardis-GPU/Stardis-Starter-Pack/cbox/cbox.txt",
+    "D:/Stardis-GPU/Stardis-Starter-Pack/porous/porous.txt",
     "D:/Works/Projects/Stardis-GPU/Stardis-Starter-Pack/porous-test\\porous.txt",
     "D:/Works/Projects/Stardis-GPU/Stardis-Starter-Pack/porous-test/porous.txt",
     "D:/Works/Projects/Stardis-GPU/Stardis-Starter-Pack/porous-тест\\porous.txt",
     "D:/Works/Projects/Stardis-GPU/Stardis-Starter-Pack/porous-тест/porous.txt"
   ],
-  "last_project_path": "D:/Works/Projects/Stardis-GPU/Stardis-Starter-Pack/porous-test\\porous.txt",
+  "last_project_path": "D:/Stardis-GPU/Stardis-Starter-Pack/city\\model.txt",
   "startup_behavior": "open_last",
   "exe_tags": {
-    "stardis-cpu": "D:/Works/Projects/Stardis-GPU\\stardis-cpu\\build\\bin\\Release\\stardis.exe",
-    "stardis-cu": "D:/Works/Projects/Stardis-GPU\\stardis-cus3d\\build\\bin\\Release\\stardis.exe",
-    "stardis-cump": "D:/Works/Projects/Stardis-GPU\\stardis-cus3d-merge-phase\\build\\bin\\Release\\stardis.exe",
-    "htpp": "D:/Works/Projects/Stardis-GPU/stardis-cpu/build/bin/Release/htpp.exe"
+    "stardis-cpu": "D:/Stardis-GPU/stardis-cpu\\build\\bin\\Release\\stardis.exe",
+    "stardis-ox": "D:/Stardis-GPU/stardis-oxs3d/build\\bin\\Release\\stardis.exe",
+    "stardis-oxmp": "D:/Stardis-GPU/stardis-oxs3d-merge-phase/build/bin\\Release\\stardis.exe",
+    "htpp": "D:/Stardis-GPU/stardis-cpu/build/bin/Release/htpp.exe",
+    "o16": "D:/Stardis-GPU/stardis-oxs3d-o16/build/bin/Release/stardis.exe",
+    "wos-fix": "D:/Stardis-GPU/stardis-oxs3d-wos-fix/build/bin/Release/stardis.exe"
   }
 }

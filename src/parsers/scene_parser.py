@@ -24,6 +24,8 @@ from models.scene_model import (
     SolidFluidConnection, SolidSolidConnection,
     BodyType, Side, BoundaryType,
     SceneLight, LightType,
+    NormalOrientation, detect_normal_orientation,
+    clone_volume,
 )
 from parsers.triangle_hash_matcher import (
     load_stl_polydata, build_parent_hash_map, match_child_to_parent,
@@ -73,12 +75,12 @@ class SceneParser:
                     model.global_settings.scale = float(tokens[1])
 
                 elif keyword == "SOLID":
-                    body = self._parse_solid(tokens, base_dir)
-                    model.bodies.append(body)
+                    name, stl_files, vol = self._parse_solid(tokens, base_dir)
+                    self._upsert_media_body(model, name, stl_files, vol)
 
                 elif keyword == "FLUID":
-                    body = self._parse_fluid(tokens, base_dir)
-                    model.bodies.append(body)
+                    name, stl_files, vol = self._parse_fluid(tokens, base_dir)
+                    self._upsert_media_body(model, name, stl_files, vol)
 
                 elif keyword == "T_BOUNDARY_FOR_SOLID":
                     flat_boundaries.append(self._parse_t_boundary(tokens, base_dir))
@@ -124,6 +126,11 @@ class SceneParser:
         # 加载伴随项目文件 (探针、摄像机、光源、zone_id)
         model.load_project(project_file)
 
+        # 法线朝向自动检测：对仍为 UNKNOWN 的 Body 尝试检测
+        for body in model.bodies:
+            if body.normal_orientation == NormalOrientation.UNKNOWN and body.stl_files:
+                body.normal_orientation = detect_normal_orientation(body.stl_files[0])
+
         # 三角形哈希匹配：从 B_*.stl 恢复涂选状态 (cell_ids)
         self._recover_paint_state_by_hash(model)
 
@@ -134,7 +141,7 @@ class SceneParser:
 
     # ─── SOLID ───────────────────────────────────────────────────
 
-    def _parse_solid(self, tokens: List[str], base_dir: str) -> Body:
+    def _parse_solid(self, tokens: List[str], base_dir: str):
         # SOLID <name> <λ> <ρ> <cp> <δ|AUTO> <T_init> <T_imposed|UNKNOWN> <power> <FRONT|BACK|BOTH> <stl...>
         name = tokens[1]
         lam = float(tokens[2])
@@ -147,10 +154,10 @@ class SceneParser:
         side = Side[tokens[9].upper()]
         stl_files = [self._resolve_path(t, base_dir) for t in tokens[10:]]
 
-        return Body(
-            name=name,
-            stl_files=stl_files,
-            volume=VolumeProperties(
+        return (
+            name,
+            stl_files,
+            VolumeProperties(
                 body_type=BodyType.SOLID,
                 material=MaterialRef(conductivity=lam, density=rho, specific_heat=cp),
                 delta=delta,
@@ -158,12 +165,12 @@ class SceneParser:
                 imposed_temp=t_imposed,
                 volumetric_power=power,
                 side=side,
-            ),
+            )
         )
 
     # ─── FLUID ───────────────────────────────────────────────────
 
-    def _parse_fluid(self, tokens: List[str], base_dir: str) -> Body:
+    def _parse_fluid(self, tokens: List[str], base_dir: str):
         # FLUID <name> <ρ> <cp> <T_init> <T_imposed|UNKNOWN> <FRONT|BACK|BOTH> <stl...>
         name = tokens[1]
         rho = float(tokens[2])
@@ -173,10 +180,10 @@ class SceneParser:
         side = Side[tokens[6].upper()]
         stl_files = [self._resolve_path(t, base_dir) for t in tokens[7:]]
 
-        return Body(
-            name=name,
-            stl_files=stl_files,
-            volume=VolumeProperties(
+        return (
+            name,
+            stl_files,
+            VolumeProperties(
                 body_type=BodyType.FLUID,
                 material=MaterialRef(conductivity=0.0, density=rho, specific_heat=cp),
                 delta=None,
@@ -184,8 +191,42 @@ class SceneParser:
                 imposed_temp=t_imposed,
                 volumetric_power=0.0,
                 side=side,
-            ),
+            )
         )
+
+    def _upsert_media_body(self, model: SceneModel, name: str, stl_files: List[str], vol: VolumeProperties):
+        """将一条 SOLID/FLUID 媒介定义合并到同名 Body 的 FRONT/BACK 结构中。"""
+        body = model.get_body_by_name(name)
+        if body is None:
+            body = Body(name=name, stl_files=stl_files, volume=clone_volume(vol))
+            body.front_enabled = False
+            body.back_enabled = False
+            body.sync_front_back = False
+            model.bodies.append(body)
+        elif not body.stl_files and stl_files:
+            body.stl_files = stl_files
+
+        if vol.side == Side.BOTH:
+            body.front_volume = clone_volume(vol)
+            body.back_volume = clone_volume(vol)
+            body.front_enabled = True
+            body.back_enabled = True
+            body.sync_front_back = True
+        elif vol.side == Side.FRONT:
+            body.front_volume = clone_volume(vol)
+            body.front_enabled = True
+            body.sync_front_back = False
+        else:
+            body.back_volume = clone_volume(vol)
+            body.back_enabled = True
+            body.sync_front_back = False
+
+        if body.front_volume is None and body.back_volume is not None:
+            body.front_volume = clone_volume(body.back_volume)
+        if body.back_volume is None and body.front_volume is not None:
+            body.back_volume = clone_volume(body.front_volume)
+
+        body._refresh_legacy_volume_view()
 
     # ─── 边界条件 ────────────────────────────────────────────────
 

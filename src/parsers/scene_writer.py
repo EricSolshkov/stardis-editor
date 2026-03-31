@@ -12,7 +12,7 @@ from models.scene_model import (
     SceneModel, Body, SurfaceZone, ImportedSTL, PaintedRegion,
     TemperatureBC, ConvectionBC, FluxBC, CombinedBC,
     SolidFluidConnection, SolidSolidConnection,
-    BodyType, BoundaryType,
+    BodyType, BoundaryType, Side, clone_volume,
     SceneLight, LightType,
 )
 
@@ -34,14 +34,15 @@ class SceneWriter:
         os.makedirs(output_dir, exist_ok=True)
         scene_path = os.path.join(output_dir, scene_filename)
 
-        # 1) 拷贝/链接几何 STL + 收集相对路径映射
+        # 1) 导出几何 STL（统一 ASCII 格式，命名 S_<body_name>.stl）
         body_rel = {}   # body_name → [rel_stl, ...]
         for body in model.bodies:
             rels = []
-            for stl in body.stl_files:
-                dst_name = os.path.basename(stl)
+            for idx, stl in enumerate(body.stl_files):
+                suffix = "" if idx == 0 else f"_{idx + 1}"
+                dst_name = f"S_{body.name}{suffix}.stl"
                 dst = os.path.join(output_dir, dst_name)
-                self._copy_if_needed(stl, dst)
+                self._export_stl_ascii(stl, dst)
                 rels.append(dst_name)
             body_rel[body.name] = rels
 
@@ -57,8 +58,8 @@ class SceneWriter:
                     self._export_painted_zone(body, zone, dst)
                     zone_rel[(body.name, zone.name)] = [dst_name]
                 elif isinstance(zone.source, ImportedSTL) and zone.source.stl_file:
-                    # 未涂选过的区域：拷贝原 STL，文件名统一为 B_<name>.stl
-                    self._copy_if_needed(zone.source.stl_file, dst)
+                    # 未涂选过的区域：重新导出为 ASCII STL
+                    self._export_stl_ascii(zone.source.stl_file, dst)
                     zone_rel[(body.name, zone.name)] = [dst_name]
 
         # 3) 写 scene.txt
@@ -86,7 +87,7 @@ class SceneWriter:
         lines.append("# media")
         for body in model.bodies:
             stls = " ".join(body_rel.get(body.name, []))
-            lines.append(self._body_line(body, stls))
+            lines.extend(self._body_lines(body, stls))
         lines.append("")
 
         # boundaries
@@ -115,19 +116,43 @@ class SceneWriter:
 
         return lines
 
-    def _body_line(self, body: Body, stl_str: str) -> str:
-        v = body.volume
+    def _body_lines(self, body: Body, stl_str: str) -> List[str]:
+        front_on = body.front_enabled
+        back_on = body.back_enabled
+
+        if front_on and back_on and body.sync_front_back:
+            vol = clone_volume(body.front_volume)
+            vol.side = Side.BOTH
+            return [self._single_body_line(body.name, vol, stl_str)]
+
+        lines = []
+        if front_on:
+            vol = clone_volume(body.front_volume)
+            vol.side = Side.FRONT
+            lines.append(self._single_body_line(body.name, vol, stl_str))
+        if back_on:
+            vol = clone_volume(body.back_volume)
+            vol.side = Side.BACK
+            lines.append(self._single_body_line(body.name, vol, stl_str))
+
+        if not lines:
+            # 异常兜底: 至少写一条 FRONT
+            vol = clone_volume(body.front_volume or body.volume)
+            vol.side = Side.FRONT
+            lines.append(self._single_body_line(body.name, vol, stl_str))
+        return lines
+
+    def _single_body_line(self, name: str, v, stl_str: str) -> str:
         m = v.material
         delta_s = "AUTO" if v.delta is None else str(v.delta)
         imposed_s = "UNKNOWN" if v.imposed_temp is None else str(v.imposed_temp)
 
         if v.body_type == BodyType.SOLID:
-            return (f"SOLID {body.name} {m.conductivity} {m.density} {m.specific_heat} "
+            return (f"SOLID {name} {m.conductivity} {m.density} {m.specific_heat} "
                     f"{delta_s} {v.initial_temp} {imposed_s} {v.volumetric_power} "
                     f"{v.side.value} {stl_str}")
-        else:
-            return (f"FLUID {body.name} {m.density} {m.specific_heat} "
-                    f"{v.initial_temp} {imposed_s} {v.side.value} {stl_str}")
+        return (f"FLUID {name} {m.density} {m.specific_heat} "
+                f"{v.initial_temp} {imposed_s} {v.side.value} {stl_str}")
 
     def _boundary_line(self, zone: SurfaceZone, stl_str: str) -> str:
         bc = zone.boundary
@@ -214,6 +239,28 @@ class SceneWriter:
             pass  # VTK 不可用时跳过
 
     # ─── 工具 ────────────────────────────────────────────────────
+
+    @staticmethod
+    def _export_stl_ascii(src: str, dst: str):
+        """读取任意格式 STL 并以 ASCII 格式重新写出。"""
+        src_abs = os.path.abspath(src)
+        dst_abs = os.path.abspath(dst)
+        if not os.path.isfile(src_abs):
+            return
+        try:
+            import vtk
+            reader = vtk.vtkSTLReader()
+            reader.SetFileName(src_abs)
+            reader.Update()
+            writer = vtk.vtkSTLWriter()
+            writer.SetFileName(dst_abs)
+            writer.SetInputConnection(reader.GetOutputPort())
+            writer.SetFileTypeToASCII()
+            writer.Write()
+        except ImportError:
+            # VTK 不可用时退回直接拷贝
+            if src_abs != dst_abs:
+                shutil.copy2(src_abs, dst_abs)
 
     @staticmethod
     def _copy_if_needed(src: str, dst: str):
